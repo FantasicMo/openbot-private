@@ -67,6 +67,12 @@ Keep the same argument and path on every later launch and after an upgrade. Appl
 shortcut or launch command that starts this private instance. Removing the argument selects the
 default profile; it does not find or move the profile on D:.
 
+On Windows, enabling launch at login from this installed private instance preserves its explicit
+profile path. The setting uses the existing private app login item; enabling it from a different
+profile replaces that one item. Starting the app does not enable startup or change an existing
+item. The setting reads as enabled only when its command matches the current explicit profile and
+Windows permits that item to start. Shortcuts still need the same profile argument.
+
 Choose the layout before first use. This is not a migration for an old profile that already mixes
 a database on one drive with workspaces on another. Stored agent workspace paths are not rewritten
 and files are not moved. Shared/download roots and managed recovery paths follow the selected root,

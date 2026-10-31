@@ -65,6 +65,9 @@ const workspaceDirectory = resolve(homedir(), config.productName);
 const executable = join(installDirectory, `${config.productName}.exe`);
 const uninstaller = join(installDirectory, `Uninstall ${config.productName}.exe`);
 const output = resolve(".openbot-build/private-windows-installer-e2e");
+const loginProfileDirectory = join(output, "login profile with spaces");
+const loginCommandPrefix = `"${executable}" `;
+const expectedLoginCommand = `${loginCommandPrefix}"--user-data-dir=${loginProfileDirectory}"`;
 const reportPath = join(output, "report.json");
 const logger = createOpenBotLogger("private-windows-installer-e2e", () => undefined);
 const publicOrigin = "https://private-windows-ci.invalid";
@@ -78,12 +81,14 @@ const report: {
     sentinels: { area: string; sha256: string; rootExistedBefore: boolean }[];
     verifiedAfter: string[];
   };
+  loginItemChecks: { scope: "CI_private_AUMID_only"; preservedProfileWithSpaces: boolean; removed: boolean };
   unverified: string[];
 } = {
   passed: false,
   scope: "installed_private_Windows_Electron_real_HostService_TeamApiServer_TeamStore_and_gateway",
   steps: [],
   officialDataChecks: { scope: "CI_sentinel_files_only", sentinels: [], verifiedAfter: [] },
+  loginItemChecks: { scope: "CI_private_AUMID_only", preservedProfileWithSpaces: false, removed: false },
   unverified: [
     "Tailscale Serve HTTPS trust, ACLs, LAN routing, Clash coexistence and physical devices.",
     "Android native runtime, UI, file transfers and model-provider execution.",
@@ -91,12 +96,15 @@ const report: {
     "A forced process restart is tested; normal tray shutdown and power-loss durability are separate checks.",
     "Unsigned internal candidate: no Authenticode publisher identity or SmartScreen acceptance is established.",
     "Official data preservation covers two CI-created sentinel files; other pre-existing official files are not inventoried.",
+    "Login-item registration and stored-command relaunch are tested; an actual Windows sign-in is not tested.",
   ],
 };
 let child: ChildProcess | null = null;
 let session: AutomationSession | null = null;
 let installedByThisRun = false;
 let launchFailed = false;
+let activeProfileDirectory: string | null = null;
+let loginItemMayBeOwned = false;
 const sockets: WebSocket[] = [];
 
 const statusSchema = Schema.Struct({
@@ -111,6 +119,11 @@ const acceptedSchema = Schema.Struct({
   sessionToken: Schema.String,
 });
 const meSchema = Schema.Struct({ id: Schema.String, role: Schema.String });
+const behaviorSchema = Schema.Struct({ launchAtLogin: Schema.Boolean });
+const loginRegistrationSchema = Schema.Struct({
+  command: Schema.NullOr(Schema.String),
+  approval: Schema.NullOr(Schema.String),
+});
 
 async function step<A>(name: string, action: () => Promise<A>): Promise<A> {
   try {
@@ -151,6 +164,36 @@ function protocolRegistration(): string | null {
     encoding: "utf8",
     stdio: ["ignore", "pipe", "ignore"],
   });
+}
+
+/** Reads only this private app's user-scope Run and StartupApproved values. */
+function privateLoginRegistration(): typeof loginRegistrationSchema.Type {
+  const environment = { ...process.env };
+  delete environment.PSModulePath;
+  const text = execFileSync(
+    "powershell.exe",
+    [
+      "-NoProfile",
+      "-NonInteractive",
+      "-Command",
+      `$ErrorActionPreference = 'Stop'
+$name = '${config.appId}'
+$runPath = 'Registry::HKEY_CURRENT_USER\\Software\\Microsoft\\Windows\\CurrentVersion\\Run'
+$approvedPath = 'Registry::HKEY_CURRENT_USER\\Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\StartupApproved\\Run'
+$command = $null
+$approval = $null
+if (Test-Path -LiteralPath $runPath) {
+  $command = (Get-Item -LiteralPath $runPath).GetValue($name, $null, [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)
+}
+if (Test-Path -LiteralPath $approvedPath) {
+  $value = (Get-Item -LiteralPath $approvedPath).GetValue($name)
+  if ($null -ne $value) { $approval = [Convert]::ToBase64String($value) }
+}
+@{ command = $command; approval = $approval } | ConvertTo-Json -Compress`,
+    ],
+    { encoding: "utf8", env: environment, stdio: ["ignore", "pipe", "ignore"] },
+  );
+  return Schema.decodeUnknownSync(loginRegistrationSchema)(JSON.parse(text));
 }
 
 const officialRegistration = protocolRegistration();
@@ -225,19 +268,29 @@ async function until(ready: () => boolean | Promise<boolean>): Promise<void> {
   }
 }
 
-async function startApp(): Promise<void> {
+async function startApp(userDataDirectory?: string, fromLoginItem = false): Promise<void> {
   const port = await unusedPort();
   launchFailed = false;
-  // Keep the default private data path: this proves application identity isolation, not an override.
-  child = spawn(executable, [`--remote-debugging-port=${port}`, "--remote-debugging-address=127.0.0.1"], {
+  const args = [`--remote-debugging-port=${port}`, "--remote-debugging-address=127.0.0.1"];
+  if (fromLoginItem) {
+    assert.equal(userDataDirectory, loginProfileDirectory);
+    const registration = privateLoginRegistration();
+    assert.equal(registration.command, expectedLoginCommand);
+    // Replay the exact stored argument, with its quotes, only after matching the owned command.
+    args.unshift(registration.command.slice(loginCommandPrefix.length));
+  } else if (userDataDirectory) args.unshift(`--user-data-dir=${userDataDirectory}`);
+  activeProfileDirectory = userDataDirectory ?? profileDirectory;
+  // Initial install/reinstall checks keep the default private data path.
+  child = spawn(executable, args, {
     env: {
       ...process.env,
-      CODEX_HOME: join(profileDirectory, "ci-missing-codex"),
-      CLAUDE_CONFIG_DIR: join(profileDirectory, "ci-missing-claude"),
-      OPENBOT_CODEX_PATH: join(profileDirectory, "missing-codex.exe"),
-      OPENBOT_CLAUDE_PATH: join(profileDirectory, "missing-claude.exe"),
-      OPENBOT_GROK_PATH: join(profileDirectory, "missing-grok.exe"),
+      CODEX_HOME: join(activeProfileDirectory, "ci-missing-codex"),
+      CLAUDE_CONFIG_DIR: join(activeProfileDirectory, "ci-missing-claude"),
+      OPENBOT_CODEX_PATH: join(activeProfileDirectory, "missing-codex.exe"),
+      OPENBOT_CLAUDE_PATH: join(activeProfileDirectory, "missing-claude.exe"),
+      OPENBOT_GROK_PATH: join(activeProfileDirectory, "missing-grok.exe"),
     },
+    windowsVerbatimArguments: fromLoginItem,
     windowsHide: true,
     stdio: "ignore",
   });
@@ -280,6 +333,7 @@ async function stopApp(): Promise<void> {
   if (attached) await attached.close().catch(() => undefined);
   const owned = child;
   child = null;
+  activeProfileDirectory = null;
   if (!owned || owned.exitCode !== null || owned.signalCode !== null || owned.pid === undefined) return;
   // Only the PID returned by this script's spawn, including its own child tree.
   const exited = once(owned, "exit", { signal: AbortSignal.timeout(30_000) });
@@ -294,6 +348,22 @@ async function stopApp(): Promise<void> {
 async function ipc<A>(expression: string, schema: Schema.Decoder<A>): Promise<A> {
   assert.ok(session, "The owned renderer must be connected.");
   return Schema.decodeUnknownSync(schema)(await session.page.evaluate(expression));
+}
+
+async function removeOwnedLoginItem(): Promise<void> {
+  if (!loginItemMayBeOwned) return;
+  const registration = privateLoginRegistration();
+  assert.ok(registration.command === null || registration.command === expectedLoginCommand);
+  assert.ok(installedByThisRun && existsSync(executable));
+  if (!session || activeProfileDirectory !== loginProfileDirectory) {
+    await stopApp();
+    await startApp(loginProfileDirectory);
+  }
+  const disabled = await ipc("window.openbot.setAppBehaviorPreference({ launchAtLogin: false })", behaviorSchema);
+  assert.equal(disabled.launchAtLogin, false);
+  assert.deepEqual(privateLoginRegistration(), { command: null, approval: null });
+  loginItemMayBeOwned = false;
+  report.loginItemChecks.removed = true;
 }
 
 async function verifyFuses(): Promise<void> {
@@ -317,8 +387,9 @@ async function verifyFuses(): Promise<void> {
 async function main(): Promise<void> {
   await mkdir(output, { recursive: true });
   await step("refuse_existing_private_installation_or_profile", async () => {
-    for (const path of [installDirectory, profileDirectory, workspaceDirectory])
+    for (const path of [installDirectory, profileDirectory, workspaceDirectory, loginProfileDirectory])
       assert.ok(!existsSync(path), "The disposable runner must have no private installation or profile.");
+    assert.deepEqual(privateLoginRegistration(), { command: null, approval: null });
   });
   await step("prepare_official_data_sentinels_without_overwrite", async () => {
     for (const sentinel of officialSentinels)
@@ -501,12 +572,40 @@ async function main(): Promise<void> {
     assert.ok(session);
     await session.page.screenshot({ path: join(output, "installed-app.png") });
   });
+  const loginHostId = await step("explicit_profile_with_spaces_does_not_enable_startup", async () => {
+    await stopApp();
+    await startApp(loginProfileDirectory);
+    assert.ok(existsSync(join(loginProfileDirectory, "openbot-private-owner-v1.json")));
+    assert.equal((await ipc("window.openbot.getAppBehaviorPreference()", behaviorSchema)).launchAtLogin, false);
+    assert.deepEqual(privateLoginRegistration(), { command: null, approval: null });
+    const status = await ipc("window.openbot.privateAccess.status()", statusSchema);
+    assert.ok(status.hostId && status.hostId !== first.hostId);
+    return status.hostId;
+  });
+  await step("enable_existing_private_login_item_with_exact_profile_command", async () => {
+    // Set ownership before the IPC call, so a lost reply still triggers scoped cleanup.
+    loginItemMayBeOwned = true;
+    const enabled = await ipc("window.openbot.setAppBehaviorPreference({ launchAtLogin: true })", behaviorSchema);
+    assert.equal(enabled.launchAtLogin, true);
+    assert.deepEqual(privateLoginRegistration(), { command: expectedLoginCommand, approval: null });
+  });
+  await step("relaunch_from_stored_login_argument_preserves_profile_and_enabled_readback", async () => {
+    await stopApp();
+    await startApp(loginProfileDirectory, true);
+    assert.equal((await ipc("window.openbot.privateAccess.status()", statusSchema)).hostId, loginHostId);
+    assert.equal((await ipc("window.openbot.getAppBehaviorPreference()", behaviorSchema)).launchAtLogin, true);
+    assert.deepEqual(privateLoginRegistration(), { command: expectedLoginCommand, approval: null });
+    report.loginItemChecks.preservedProfileWithSpaces = true;
+  });
+  await step("remove_only_CI_owned_private_login_item", removeOwnedLoginItem);
   await step("uninstall_only_owned_private_application_keeps_data", async () => {
     await stopApp();
     await runInstaller(uninstaller, `/S _?=${installDirectory}`);
     assert.ok(!existsSync(executable));
     assert.equal(await readFile(profileCanary, "utf8"), "private profile persistence\n");
     assert.equal(await readFile(workspaceCanary, "utf8"), "private workspace persistence\n");
+    assert.ok(existsSync(join(loginProfileDirectory, "openbot-private-owner-v1.json")));
+    assert.deepEqual(privateLoginRegistration(), { command: null, approval: null });
     await assertOfficialDataUnchanged("uninstall");
     installedByThisRun = false;
   });
@@ -518,6 +617,10 @@ try {
 } catch {
   process.exitCode = 1;
 } finally {
+  await removeOwnedLoginItem().catch(() => {
+    process.exitCode = 1;
+    report.passed = false;
+  });
   await stopApp().catch(() => {
     process.exitCode = 1;
     report.passed = false;

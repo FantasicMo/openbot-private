@@ -1,11 +1,12 @@
 import { readFile, rm } from "node:fs/promises";
 import { homedir } from "node:os";
-import { isAbsolute, join } from "node:path";
+import { isAbsolute, join, resolve } from "node:path";
 import type { AppVariant } from "@openbot/contracts/ipc";
 import { Effect, Schema } from "effect";
 import { app } from "electron";
 import { writeFileAtomically } from "../backend/atomic-json-file";
 import { isMissingFileError } from "../backend/file-errors";
+import { PRIVATE_APP_ID, PRIVATE_BUILD } from "./private-access-build";
 
 export class LoginItemFailure extends Schema.TaggedError<LoginItemFailure>()("LoginItemFailure", {
   cause: Schema.Defect(),
@@ -25,6 +26,8 @@ export interface LoginItem {
  */
 export function createLoginItem(options: { appVariant: AppVariant; server: boolean }): LoginItem | null {
   if (!app.isPackaged || options.server) return null;
+  if (PRIVATE_BUILD && process.platform === "win32" && app.commandLine.getSwitchValue("user-data-dir").trim() !== "")
+    return privateWindowsProfileLoginItem();
   if (process.platform !== "linux") return electronLoginItem();
   const configHome = process.env.XDG_CONFIG_HOME;
   return linuxAutostartLoginItem({
@@ -34,6 +37,35 @@ export function createLoginItem(options: { appVariant: AppVariant; server: boole
     // The AppImage runtime names its own file here. `execPath` is inside the mount, which ends with the run.
     executablePath: process.env.APPIMAGE || process.execPath,
   });
+}
+
+/** Keeps the selected private profile in the existing private Windows login item. */
+function privateWindowsProfileLoginItem(): LoginItem {
+  // Electron 44 quotes each argument. Its Windows launch-item lookup parses the executable as a
+  // command line, so quote that path once and pass the profile switch without embedded quotes.
+  const path = `"${process.execPath}"`;
+  const args = [`--user-data-dir=${resolve(app.getPath("userData"))}`];
+  return {
+    read: () =>
+      Effect.try({
+        try: () => {
+          const settings = app.getLoginItemSettings({ path, args });
+          // openAtLogin matches the complete command. executableWillLaunchAtLogin ignores args.
+          return (
+            settings.openAtLogin &&
+            settings.launchItems.some((item) => item.name === PRIVATE_APP_ID && item.scope === "user" && item.enabled)
+          );
+        },
+        catch: (cause) => new LoginItemFailure({ cause }),
+      }),
+    write: (enabled) =>
+      Effect.try({
+        try: () => app.setLoginItemSettings({ openAtLogin: enabled, path, args }),
+        catch: (cause) => new LoginItemFailure({ cause }),
+      }),
+    // Starting the app must not enable or replace a login item.
+    refresh: () => Effect.void,
+  };
 }
 
 /**

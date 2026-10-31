@@ -43,6 +43,12 @@ completed verification phase. This proves preservation of those sentinel files, 
 of all pre-existing official user data. The test does not delete the sentinel files or their roots.
 
 The screenshot records the installed app screen. It is not proof that provider setup or a task ran.
+The smoke also opens a new explicit profile whose path contains spaces. It enables the existing
+private Windows login item through trusted IPC, reads its exact registry command and approval,
+relaunches the owned executable with the stored quoted argument, and checks the same host identity
+and enabled setting. It then removes only the CI-created private item and verifies its absence.
+An existing private Run or StartupApproved value stops the smoke before any change. An actual
+Windows sign-in is a separate check; this smoke does not change this computer's login items.
 The report also excludes TLS/Serve, Android, remote desktop/browser streaming, older-release
 migration, normal tray shutdown, SmartScreen and Authenticode publisher acceptance. No owner secret,
 device credential, pairing offer, profile, raw application log or workspace is uploaded.
@@ -59,3 +65,35 @@ Record the run URL and installer hash with manual Windows/Android acceptance. Ke
 accepted bytes for later publication. A rebuild is a new candidate and needs its own acceptance.
 Adding these workflows or passing static checks is not evidence that a cloud build or installed
 application passed. The first executed run must produce its own reports.
+
+## Opt-in real Codex task checks
+
+`scripts/private-live-task-smoke.ts` uses the existing private development host and its existing
+Codex agent. It requires an exact registry instance, HTTPS origin, agent ID, `--allow-mutations`
+and `--run-codex-task`. It verifies registry/CDP ownership, pairs one temporary admin device, and
+uses the portable mobile client with the released HTTP codecs over real HTTPS/WSS. Do not put
+provider credentials or a real tailnet identity in CI to run it.
+
+```powershell
+bun scripts/private-live-task-smoke.ts --instance=<instance-id> --origin=https://<host>.ts.net `
+  --agent-id=<agent-id> --allow-mutations --run-codex-task --case=receipt-file
+bun scripts/private-live-task-smoke.ts --instance=<instance-id> --origin=https://<host>.ts.net `
+  --agent-id=<agent-id> --allow-mutations --run-codex-task --case=queue-cancel
+```
+
+Run the cases in order on an idle agent. `receipt-file` submits the same request ID twice, checks
+stable message/delivery IDs and a single projected message, then compares the exact output bytes
+and SHA-256 through both local storage and authenticated HTTP. Receipt status may change between
+the requests. This deliberate retry does not simulate a lost response or every network failure.
+
+`queue-cancel` requires the existing queue setting. It asks one run-marked question, verifies that
+the exact turn and question are still pending, then queues and cancels a second owned message.
+It checks the queued delivery never gained a turn, interrupts only the first owned turn, and
+requires matching delivery, WSS completion and fresh runtime evidence. No fixed sleep proves a
+state transition, and a missing question tool fails the check.
+
+The scripts retain their own messages and files for review and remove only their run devices.
+Reports under `.openbot-build/private-live-task-smoke/` record the checkout commit, dirty state,
+fixed failure stages, receipts, hashes and cleanup result. They contain local host identifiers and
+must stay out of public artifacts. The report is not an attestation of the running app's build or
+proof of native Android behavior. A failed run can leave its own unfinished task for inspection.
