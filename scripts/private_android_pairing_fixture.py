@@ -33,6 +33,8 @@ def native_pairing_fixture(device, shell, package, activity, uid, chain, tables,
     evidence = {"passed": False, "scope": "isolated_HTTPS_fixture_native_crypto_fetch_and_SecureStore", "steps": []}
     server = None
     thread = None
+    state = None
+    state_lock = threading.Lock()
     try:
         with tempfile.TemporaryDirectory(prefix="openbot-native-pairing-") as scratch:
             root = Path(scratch)
@@ -56,7 +58,6 @@ def native_pairing_fixture(device, shell, package, activity, uid, chain, tables,
             secret, token, offer_id = base64url(secrets.token_bytes(32)), base64url(secrets.token_bytes(32)), str(uuid.uuid4())
             sensitive.extend([secret, token])
             state = {"badSignature": True, "identity": 0, "pair": 0, "authenticated": 0, "reopenedAuthenticated": 0, "reopenedWebsocket": 0, "members": [], "routes": {}}
-            state_lock = threading.Lock()
 
             class Handler(BaseHTTPRequestHandler):
                 def log_message(self, *_args):
@@ -198,7 +199,19 @@ def native_pairing_fixture(device, shell, package, activity, uid, chain, tables,
 
             def tree():
                 shell("uiautomator", "dump", "--compressed", "/sdcard/openbot-private-fixture.xml")
-                return ET.fromstring(device("exec-out", "cat", "/sdcard/openbot-private-fixture.xml").stdout)
+                current = ET.fromstring(device("exec-out", "cat", "/sdcard/openbot-private-fixture.xml").stdout)
+                values = text_values(current)
+                # Keep only fixed flags. Never save a populated field, arbitrary text or screenshot.
+                evidence["lastUi"] = {
+                    "pairingInputPresent": any(node.get("class", "").endswith("EditText") for node in current.iter("node")),
+                    "fixtureOfferPresent": any(node.get("class", "").endswith("EditText") and node.get("text", "") == link for node in current.iter("node")),
+                    "pairButtonPresent": "Pair host" in values,
+                    "identityRejected": "The host identity could not be verified." in values,
+                    "offerRejected": "This private pairing offer is invalid." in values,
+                    "pairingFailed": "The host could not be paired. Check the offer and connection." in values,
+                    "networkFailed": "The private host could not be reached." in values,
+                }
+                return current
 
             def text_values(value):
                 return [node.get(key, "") for node in value.iter("node") for key in ("text", "content-desc", "hint")]
@@ -212,19 +225,52 @@ def native_pairing_fixture(device, shell, package, activity, uid, chain, tables,
                     time.sleep(1)
                 raise RuntimeError("The native fixture UI did not reach its fixed acceptance condition.")
 
-            def launch_offer():
+            def launch_offer(phase):
+                nonlocal stage
+                stage = f"{phase}-launch-input"
                 shell("am", "force-stop", package)
-                shell("am", "start", "-W", "-a", "android.intent.action.VIEW", "-d", shlex.quote(link), "-p", package, timeout=90)
-                current = wait_for(lambda value: any(node.get("class", "").endswith("EditText") and node.get("text", "").startswith("openbot-private:") for node in value.iter("node")))
-                button = next(node for node in current.iter("node") if node.get("text") == "Pair host" or node.get("content-desc") == "Pair host")
-                bounds = re.fullmatch(r"\[(\d+),(\d+)\]\[(\d+),(\d+)\]", button.get("bounds", ""))
-                if bounds is None:
-                    raise RuntimeError("The fixture pairing button has no bounds.")
-                left, top, right, bottom = map(int, bounds.groups())
+                shell("am", "start", "-W", "-n", activity, timeout=90)
+                current = wait_for(lambda value: any(node.get("class", "").endswith("EditText") for node in value.iter("node")))
+                field = next(node for node in current.iter("node") if node.get("class", "").endswith("EditText"))
+
+                def bounds(node):
+                    match = re.fullmatch(r"\[(\d+),(\d+)\]\[(\d+),(\d+)\]", node.get("bounds", ""))
+                    if match is None:
+                        raise RuntimeError("The fixture UI target has no bounds.")
+                    return tuple(map(int, match.groups()))
+
+                left, top, right, bottom = bounds(field)
                 shell("input", "tap", str((left + right) // 2), str((top + bottom) // 2))
+                stage = f"{phase}-fill-input"
+                # Use the same text-input path as startup smoke. Pairing acceptance does not need
+                # a cold deep-link route to consume and prefill this long fixture offer.
+                # Android input replaces only the special %s escape; JSON URL encoding has none.
+                if "%s" in link:
+                    raise RuntimeError("The fixture input contains an unsupported text escape.")
+                shell("input", "text", shlex.quote(link), timeout=120)
+                shell("input", "keyevent", "111")
+                current = wait_for(lambda value: any(node.get("class", "").endswith("EditText") and node.get("text", "") == link for node in value.iter("node")))
+                stage = f"{phase}-find-submit"
+                size = re.findall(r"(\d+)x(\d+)", shell("wm", "size"))
+                if not size:
+                    raise RuntimeError("The disposable display size is missing.")
+                width, height = map(int, size[-1])
+                for _attempt in range(8):
+                    button = next((node for node in current.iter("node") if node.get("text") == "Pair host" or node.get("content-desc") == "Pair host"), None)
+                    if button is not None:
+                        left, top, right, bottom = bounds(button)
+                        if left < right and top < bottom and 0 <= top < bottom <= height:
+                            shell("input", "tap", str((left + right) // 2), str((top + bottom) // 2))
+                            return
+                    # The multiline input grows for a long offer. Scroll from the outer padding,
+                    # not from inside the text field, so the parent scroll view reveals the button.
+                    shell("input", "swipe", str(width - 12), str(height * 4 // 5), str(width - 12), str(height // 4), "400")
+                    current = tree()
+                raise RuntimeError("The fixture submit button did not become visible.")
 
             stage = "reject-invalid-signature"
-            launch_offer()
+            launch_offer("invalid-proof")
+            stage = "reject-invalid-signature"
             wait_for(lambda value: "The host identity could not be verified." in text_values(value))
             with state_lock:
                 if state["identity"] != 1 or state["pair"] != 0:
@@ -233,7 +279,8 @@ def native_pairing_fixture(device, shell, package, activity, uid, chain, tables,
             evidence["steps"].append({"name": "native_TLS_fetch_body_and_invalid_Ed25519_proof_rejected", "passed": True})
 
             stage = "pair-valid-proof"
-            launch_offer()
+            launch_offer("valid-proof")
+            stage = "pair-valid-proof"
             wait_for(lambda value: state["pair"] == 1 and not any(node.get("class", "").endswith("EditText") for node in value.iter("node")))
             evidence["steps"].append({"name": "valid_Ed25519_proof_pair_POST_and_saved_native_session", "passed": True})
             stage = "reopen-saved-session"
@@ -265,5 +312,8 @@ def native_pairing_fixture(device, shell, package, activity, uid, chain, tables,
             server.server_close()
         if thread is not None:
             thread.join(timeout=5)
+        if state is not None:
+            with state_lock:
+                evidence["requests"] = {"identity": state["identity"], "redemptions": state["pair"], "authenticated": state["authenticated"], "reopenedAuthenticated": state["reopenedAuthenticated"], "reopenedWebsocketAttempts": state["reopenedWebsocket"], "members": len(state["members"])}
         (output / "native-pairing.json").write_text(json.dumps(evidence, indent=2) + "\n")
     return evidence
