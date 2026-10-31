@@ -236,10 +236,14 @@ jobs:
     timeout-minutes: 35
     env:
       CI: "1"
-      CANDIDATE_DIR: ${{ runner.temp }}/private-android-candidate
-      ANDROID_AVD_HOME: ${{ runner.temp }}/private-android-avd
       SOURCE_ARTIFACT_ID: ${{ needs.candidate.outputs.artifact_id }}
     steps:
+      - name: Select disposable emulator directories
+        shell: bash
+        run: |
+          echo "CANDIDATE_DIR=$RUNNER_TEMP/private-android-candidate" >> "$GITHUB_ENV"
+          echo "ANDROID_AVD_HOME=$RUNNER_TEMP/private-android-avd" >> "$GITHUB_ENV"
+
       - name: Check out smoke script
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:

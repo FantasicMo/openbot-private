@@ -26,10 +26,11 @@ keep the working VPN profile; record the error before considering a separate bui
 
 ## Host information needed before the phone test
 
-The Windows desktop is already signed in to its official Tailscale client. Serve has been enabled
-with Funnel off, but the first local HTTPS check had an SSL error. Existing proxy fake-IP/routing
-is being checked; the cause and a healthy HTTPS result are not yet established. Obtain the following
-from the host when that gate passes:
+The Windows desktop is signed in to its official Tailscale client. Serve is enabled with Funnel off.
+The host's Clash fake-IP conflict was resolved with an exact-host override: ordinary hostname HTTPS
+now verifies its certificate and reaches the real Team API. The original public proxy remains usable.
+A local shared-client check also passed real WSS, files, reconnect and device revocation. These host
+results do not establish phone behavior. Obtain the following before the phone test:
 
 - Its complete Serve name, for example `openbot-host.YOUR-TAILNET.ts.net`, and HTTPS origin on port 443.
 - Its Tailscale IPv4 address, and IPv6 address only if it is used. The examples below are placeholders.
