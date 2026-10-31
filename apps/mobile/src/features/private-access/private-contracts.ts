@@ -10,6 +10,20 @@ import { Schema } from "effect";
 
 export const MAX_PRIVATE_HOSTS = 32;
 
+export type PrivatePairingStage =
+  | "offer-check"
+  | "identity-random"
+  | "identity-request"
+  | "identity-body"
+  | "identity-check"
+  | "credential-random"
+  | "pending-save"
+  | "recovery-request"
+  | "redemption-request"
+  | "authentication-body"
+  | "authentication-check"
+  | "complete-save";
+
 export class PrivateMobileError extends Error {
   constructor(
     readonly code:
@@ -21,10 +35,26 @@ export class PrivateMobileError extends Error {
       | "unsupported"
       | "session"
       | "network",
+    readonly diagnostic?: { stage: PrivatePairingStage; status?: number },
   ) {
     super(`Private access: ${code}`);
     this.name = "PrivateMobileError";
   }
+}
+
+/** Keep only a fixed stage and numeric HTTP status. Never retain the thrown cause or response. */
+export function privatePairingFailure(cause: unknown, stage: PrivatePairingStage, status?: number): PrivateMobileError {
+  if (cause instanceof PrivateMobileError && cause.diagnostic) return cause;
+  const code = cause instanceof PrivateMobileError ? cause.code : stage.endsWith("-request") ? "network" : "pair";
+  return new PrivateMobileError(code, {
+    stage,
+    ...(Number.isInteger(status) && status !== undefined && status >= 100 && status <= 599 ? { status } : {}),
+  });
+}
+
+export function privatePairingDiagnosticCode(error: PrivateMobileError): string | null {
+  const diagnostic = error.diagnostic;
+  return diagnostic ? `${diagnostic.stage}${diagnostic.status === undefined ? "" : `/${diagnostic.status}`}` : null;
 }
 
 export interface PrivateHostIdentity {

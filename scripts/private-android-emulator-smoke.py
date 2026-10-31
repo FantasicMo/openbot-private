@@ -12,6 +12,7 @@ import sys
 import time
 import xml.etree.ElementTree as ET
 import zipfile
+from private_android_pairing_fixture import native_pairing_fixture
 
 
 PACKAGE = "io.github.fantasicmo.openbot"
@@ -60,6 +61,7 @@ def main():
     parser.add_argument("--observe-seconds", type=int, default=30)
     parser.add_argument("--expected-apk-sha256")
     parser.add_argument("--expected-version-code", type=int)
+    parser.add_argument("--pairing-fixture", action="store_true", help="Also test native pairing against an isolated HTTPS fixture with an emulator-only system test CA.")
     args = parser.parse_args()
     if os.environ.get("GITHUB_ACTIONS") != "true" or os.environ.get("RUNNER_ENVIRONMENT") != "github-hosted" or sys.platform != "linux":
         parser.error("This command requires a disposable GitHub-hosted Linux runner.")
@@ -80,6 +82,8 @@ def main():
     process = None
     app_uid = None
     configured_tables = []
+    sensitive_values = []
+    pairing_started = False
     report = {
         "schema": 1,
         "passed": False,
@@ -269,11 +273,22 @@ def main():
                 raise RuntimeError("The unpaired private app attempted IP egress during startup.")
         record("no_app_uid_ip_egress_observed_during_startup_window", lambda: None)
         screen("startup-complete")
+        if args.pairing_fixture:
+            pairing_started = True
+            report["nativePairing"] = native_pairing_fixture(
+                device, shell, PACKAGE, activity, app_uid, CHAIN, configured_tables, output, sensitive_values,
+            )
+            record("isolated_HTTPS_native_identity_pairing_and_SecureStore_reopen", lambda: None)
         report["passed"] = True
     except Exception as error:
         report["error"] = f"{type(error).__name__}: {error}"
+        pairing_report = output / "native-pairing.json"
+        if pairing_started and pairing_report.exists():
+            report["nativePairing"] = json.loads(pairing_report.read_text())
         try:
-            screen("failure")
+            # A fixture offer is ephemeral, but it must not enter screenshots or XML artifacts.
+            if not pairing_started:
+                screen("failure")
         except Exception:
             pass
     finally:
@@ -281,8 +296,16 @@ def main():
             try:
                 pid = shell("pidof", PACKAGE, check=False).split()
                 if pid:
-                    (output / "app-logcat.txt").write_bytes(device("logcat", "-d", "-v", "threadtime", "--pid=" + pid[0], check=False).stdout)
-                (output / "crash-logcat.txt").write_bytes(device("logcat", "-d", "-b", "crash", check=False).stdout)
+                    logs = device("logcat", "-d", "-v", "threadtime", "--pid=" + pid[0], check=False).stdout.decode("utf-8", "replace")
+                    for secret in sensitive_values:
+                        logs = logs.replace(secret, "[fixture-redacted]")
+                    logs = re.sub(r"openbot-private:[^\s\"'<>]+", "[fixture-link-redacted]", logs)
+                    (output / "app-logcat.txt").write_text(logs)
+                crash = device("logcat", "-d", "-b", "crash", check=False).stdout.decode("utf-8", "replace")
+                for secret in sensitive_values:
+                    crash = crash.replace(secret, "[fixture-redacted]")
+                crash = re.sub(r"openbot-private:[^\s\"'<>]+", "[fixture-link-redacted]", crash)
+                (output / "crash-logcat.txt").write_text(crash)
                 (output / "device.txt").write_text(shell("getprop"))
                 for table in configured_tables:
                     shell(table, "-w", "5", "-D", "OUTPUT", "-m", "owner", "--uid-owner", app_uid, "-j", CHAIN, check=False)

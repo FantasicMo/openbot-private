@@ -4,13 +4,21 @@ import { useState } from "react";
 import { ScrollView, View } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { QrScanner } from "@/features/auth/components/qr-scanner";
+import { supportLog } from "@/features/support/model/support-log";
 import { SheetFormField } from "@/shared/components/sheet-form-field";
 import { SheetSaveAction } from "@/shared/components/sheet-save-action";
 import { SheetScrollView } from "@/shared/components/sheet-scroll-view";
 import { useText } from "@/shared/lib/text";
 import { usePrivateAccess } from "./private-access-context";
-import { PrivateMobileError } from "./private-contracts";
+import { PrivateMobileError, privatePairingDiagnosticCode } from "./private-contracts";
 import { takePrivateOffer } from "./private-incoming";
+
+function pairingError(cause: unknown): PrivateMobileError {
+  const error = cause instanceof PrivateMobileError ? cause : new PrivateMobileError("pair");
+  const code = privatePairingDiagnosticCode(error);
+  supportLog.add("warn", "connection", `Private pairing failed: ${error.code}${code ? ` (${code})` : ""}`);
+  return error;
+}
 
 export function PrivateAddHostScreen() {
   return <PrivatePairingScreen sheet />;
@@ -32,7 +40,7 @@ export function PrivatePairingScreen({ sheet = false }: { sheet?: boolean }) {
       if (sheet) router.dismissTo("/connected");
       else router.replace("/connected");
     } catch (cause) {
-      setError(cause instanceof PrivateMobileError ? cause : new PrivateMobileError("pair"));
+      setError(pairingError(cause));
     } finally {
       setBusy(false);
     }
@@ -61,9 +69,16 @@ export function PrivatePairingScreen({ sheet = false }: { sheet?: boolean }) {
         </View>
       ) : null}
       {error ? (
-        <Typography.Paragraph accessibilityLiveRegion="polite" className="text-danger-text">
-          {t(`mobile.private.error.${error.code}`)}
-        </Typography.Paragraph>
+        <View className="gap-2" accessibilityLiveRegion="polite">
+          <Typography.Paragraph className="text-danger-text">
+            {t(`mobile.private.error.${error.code}`)}
+          </Typography.Paragraph>
+          {privatePairingDiagnosticCode(error) ? (
+            <Typography.Paragraph className="text-danger-text">
+              {t("mobile.private.diagnosticCode", { code: privatePairingDiagnosticCode(error) ?? "" })}
+            </Typography.Paragraph>
+          ) : null}
+        </View>
       ) : null}
       {sheet ? null : (
         <Button isDisabled={busy || !value.trim() || Boolean(access?.error)} onPress={() => void pair()}>
@@ -77,6 +92,11 @@ export function PrivatePairingScreen({ sheet = false }: { sheet?: boolean }) {
       >
         <Button.Label>{t("mobile.private.scan")}</Button.Label>
       </Button>
+      {!sheet ? (
+        <Button variant="ghost" onPress={() => router.push("/private-support")}>
+          <Button.Label>{t("mobile.settings.home.support")}</Button.Label>
+        </Button>
+      ) : null}
     </View>
   );
   if (sheet)
@@ -119,8 +139,11 @@ export function PrivateScanScreen() {
             await access.store.pair(value);
             router.dismissTo("/connected");
           } catch (cause) {
-            const error = cause instanceof PrivateMobileError ? cause : new PrivateMobileError("pair");
-            throw new Error(t(`mobile.private.error.${error.code}`));
+            const error = pairingError(cause);
+            const code = privatePairingDiagnosticCode(error);
+            throw new Error(
+              `${t(`mobile.private.error.${error.code}`)}${code ? ` ${t("mobile.private.diagnosticCode", { code })}` : ""}`,
+            );
           }
         }}
       />

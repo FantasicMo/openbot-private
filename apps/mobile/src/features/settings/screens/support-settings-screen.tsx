@@ -3,6 +3,7 @@ import * as Sharing from "expo-sharing";
 import { Typography } from "heroui-native";
 import { useState, useSyncExternalStore } from "react";
 import { Alert, Linking, ScrollView } from "react-native";
+import { isPrivateBuild } from "@/features/private-access/private-build";
 import {
   SettingsContent,
   SettingsNote,
@@ -25,7 +26,7 @@ const LEVEL_CLASS = {
   error: "text-danger-text",
 } as const satisfies Record<SupportLogLevel, string>;
 
-export function SupportSettingsScreen() {
+export function SupportSettingsScreen({ logsOnly = isPrivateBuild }: { logsOnly?: boolean } = {}) {
   const { t } = useText();
   const entries = useSyncExternalStore(supportLog.subscribe, supportLog.entries);
   const [linkError, setLinkError] = useState<string | null>(null);
@@ -69,15 +70,17 @@ export function SupportSettingsScreen() {
 
   return (
     <SettingsContent>
-      <SettingsSection title={t("mobile.settings.support.help")} footer={t("mobile.settings.support.helpFooter")}>
-        <SettingsRow onPress={() => open(ISSUES_URL)}>
-          <Typography.Paragraph>{t("mobile.settings.support.issues")}</Typography.Paragraph>
-        </SettingsRow>
-        <SettingsRow onPress={() => open(SUPPORT_X_URL)} supportingText={SUPPORT_X_HANDLE}>
-          <Typography.Paragraph>{t("mobile.settings.support.message")}</Typography.Paragraph>
-        </SettingsRow>
-        {linkError ? <SettingsNote>{linkError}</SettingsNote> : null}
-      </SettingsSection>
+      {logsOnly ? null : (
+        <SettingsSection title={t("mobile.settings.support.help")} footer={t("mobile.settings.support.helpFooter")}>
+          <SettingsRow onPress={() => open(ISSUES_URL)}>
+            <Typography.Paragraph>{t("mobile.settings.support.issues")}</Typography.Paragraph>
+          </SettingsRow>
+          <SettingsRow onPress={() => open(SUPPORT_X_URL)} supportingText={SUPPORT_X_HANDLE}>
+            <Typography.Paragraph>{t("mobile.settings.support.message")}</Typography.Paragraph>
+          </SettingsRow>
+          {linkError ? <SettingsNote>{linkError}</SettingsNote> : null}
+        </SettingsSection>
+      )}
       <SettingsSection title={t("mobile.settings.support.log")} footer={t("mobile.settings.support.logFooter")}>
         <SettingsRow
           onPress={() => void save()}

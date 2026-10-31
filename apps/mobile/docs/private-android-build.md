@@ -227,6 +227,25 @@ the upstream path and must not be used for this candidate.
 
 ## Android acceptance
 
+The existing-artifact workflow has an optional `native_pairing_fixture` input. It uses the same
+signed APK after the startup packet-count window. A runner-local Python HTTPS fixture signs a
+fresh identity challenge with an ephemeral Ed25519 key. Its CA is trusted only in the disposable
+API 36 emulator's Conscrypt system store, including the zygote mount namespaces. The APK's trust
+configuration and bytes stay unchanged. All other app-UID IP egress stays blocked; only the
+fixture's `10.0.2.2` TCP port is allowed.
+
+This check must reject an invalid signature before redemption, accept the valid identity and
+one-use fixture offer, and restore the saved native session after a process stop and reopen.
+It records stage/counters in `emulator/native-pairing.json`. It keeps keys, offers and credentials
+out of artifacts and does not capture a populated pairing form. This limited HTTP fixture does
+not implement a real host, provider or accepted WSS session. Passing it does not establish
+Tailscale DNS readiness, Clash Mi app routing, ARM64 phone TLS, tasks or files.
+
+Pairing failures in the app show a fixed diagnostic stage and, when available, an HTTP status.
+The first-host screen has a Support entry to view or save the local support log before a host
+is paired. The private pairing diagnostic path records no raw cause, URL, offer, credentials or
+response body. It does not add retries or change identity, TLS, expiry or redemption rules.
+
 Test the exact candidate APK on an x86_64 Android emulator first. Keep the host, provider and files
 isolated. Use a deterministic fake provider. Record the APK hash and these results:
 

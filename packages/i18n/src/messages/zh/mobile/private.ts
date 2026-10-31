@@ -11,6 +11,7 @@ export const messages = {
   "mobile.private.addHost": "添加私网主机",
   "mobile.private.forgetHost": "移除此主机",
   "mobile.private.device": "当前设备",
+  "mobile.private.diagnosticCode": "诊断代码：{code}",
   "mobile.private.error.invalidOffer": "私网配对信息无效。",
   "mobile.private.error.expiredOffer": "配对信息已过期，请在电脑上重新生成。",
   "mobile.private.error.identity": "无法验证主机身份。",

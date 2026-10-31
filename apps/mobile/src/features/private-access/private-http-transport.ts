@@ -22,7 +22,13 @@ import { base64ToBytes, bytesToBase64, bytesToBase64Url } from "@openbot/team-cl
 import { verifyEd25519Base64Url } from "@openbot/team-client/ed25519";
 import { MOBILE_ATTACHMENT_BYTES, type RemoteFileUpload } from "@openbot/team-client/remote-peer";
 import { InactiveRequestError } from "../workspace/model/pending-approvals";
-import { type PrivateHostIdentity, PrivateMobileError, type PrivatePairedHost } from "./private-contracts";
+import {
+  type PrivateHostIdentity,
+  PrivateMobileError,
+  type PrivatePairedHost,
+  type PrivatePairingStage,
+  privatePairingFailure,
+} from "./private-contracts";
 import type { PrivateNetworkPort, PrivateTransportEvents } from "./private-ports";
 
 const FILE_LIMIT = MOBILE_ATTACHMENT_BYTES;
@@ -56,29 +62,39 @@ export async function verifyPrivateHost(
   host: PrivateHostIdentity,
   appVersion = "private-mobile",
 ): Promise<void> {
-  const challenge = bytesToBase64Url(network.randomBytes(24));
-  const response = await network.fetch(
-    new URL(`${TEAM_API_ROUTES.identity}?challenge=${challenge}`, host.publicOrigin).toString(),
-    {
-      redirect: "error",
-      signal: AbortSignal.timeout(TIMEOUT_MS),
-      headers: privateTeamHeaders(appVersion),
-    },
-  );
-  if (!response.ok) throw new PrivateMobileError("identity");
-  const proof = JSON.parse(await boundedText(response, JSON_LIMIT));
-  if (
-    !isDynamicRecord(proof) ||
-    proof.serverId !== host.hostId ||
-    proof.challenge !== challenge ||
-    proof.fingerprint !== host.hostFingerprint ||
-    proof.publicKey !== host.hostPublicKey ||
-    !isString(proof.signature) ||
-    !(await runTeamEffect(
-      verifyEd25519Base64Url(proof.signature, new TextEncoder().encode(challenge), host.hostPublicKey),
-    ))
-  )
-    throw new PrivateMobileError("identity");
+  let stage: PrivatePairingStage = "identity-random";
+  let status: number | undefined;
+  try {
+    const challenge = bytesToBase64Url(network.randomBytes(24));
+    stage = "identity-request";
+    const response = await network.fetch(
+      new URL(`${TEAM_API_ROUTES.identity}?challenge=${challenge}`, host.publicOrigin).toString(),
+      {
+        redirect: "error",
+        signal: AbortSignal.timeout(TIMEOUT_MS),
+        headers: privateTeamHeaders(appVersion),
+      },
+    );
+    status = response.status;
+    if (!response.ok) throw new PrivateMobileError("identity");
+    stage = "identity-body";
+    const proof = JSON.parse(await boundedText(response, JSON_LIMIT));
+    stage = "identity-check";
+    if (
+      !isDynamicRecord(proof) ||
+      proof.serverId !== host.hostId ||
+      proof.challenge !== challenge ||
+      proof.fingerprint !== host.hostFingerprint ||
+      proof.publicKey !== host.hostPublicKey ||
+      !isString(proof.signature) ||
+      !(await runTeamEffect(
+        verifyEd25519Base64Url(proof.signature, new TextEncoder().encode(challenge), host.hostPublicKey),
+      ))
+    )
+      throw new PrivateMobileError("identity");
+  } catch (cause) {
+    throw privatePairingFailure(cause, stage, status);
+  }
 }
 
 async function boundedBytes(

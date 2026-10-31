@@ -7,4 +7,5 @@
 
 ### Fixed
 
+- Show a fixed pairing diagnostic stage and numeric HTTP status on failures, without the offer, credentials, host URL, response body or raw exception. Make the support log available before the first host is paired.
 - Refuse a new private host when the saved list reaches 32 hosts, before network requests or credential writes. Existing hosts can still be paired again. Validate saved changes so the app cannot write a host list that it cannot restore.

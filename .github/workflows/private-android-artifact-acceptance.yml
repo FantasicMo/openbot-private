@@ -23,6 +23,11 @@ on:
         description: Expected positive Android versionCode.
         required: true
         type: string
+      native_pairing_fixture:
+        description: Also test native HTTPS identity, pairing and saved-session reopen with an emulator-only system test CA.
+        required: false
+        default: false
+        type: boolean
 
 permissions:
   contents: read
@@ -44,6 +49,7 @@ jobs:
       BUILD_COMMIT: ${{ inputs.build_commit }}
       EXPECTED_APK_SHA256: ${{ inputs.apk_sha256 }}
       EXPECTED_VERSION_CODE: ${{ inputs.version_code }}
+      NATIVE_PAIRING_FIXTURE: ${{ inputs.native_pairing_fixture && '1' || '0' }}
       CERT_SHA256: ${{ vars.PRIVATE_ANDROID_CERT_SHA256 }}
     steps:
       - name: Select disposable acceptance directories
@@ -175,8 +181,10 @@ jobs:
         id: startup
         shell: bash
         run: |
+          fixture_args=()
+          if [[ "$NATIVE_PAIRING_FIXTURE" == '1' ]]; then fixture_args+=(--pairing-fixture); fi
           python3 scripts/private-android-emulator-smoke.py --candidate-dir "$CANDIDATE_DIR" \
-            --expected-apk-sha256 "$EXPECTED_APK_SHA256" --expected-version-code "$EXPECTED_VERSION_CODE"
+            --expected-apk-sha256 "$EXPECTED_APK_SHA256" --expected-version-code "$EXPECTED_VERSION_CODE" "${fixture_args[@]}"
 
       - name: Record exact-byte acceptance state
         if: always()
@@ -204,6 +212,7 @@ jobs:
               'packaging': 'passed' if report.get('certificateSha256') == provenance['expectedCertificateSha256'] and report.get('versionCode') == provenance['expectedVersionCode'] else 'not_confirmed',
               'emulatorStartup': 'passed' if passed else os.environ.get('STARTUP_OUTCOME', 'not_run'),
               'networkEvidence': report.get('network', {'instrumented': False}),
+              'nativePairingFixture': report.get('nativePairing', {'passed': False, 'status': 'not_run'}),
               'realHostPairing': 'not_run', 'phoneAndClashMi': 'not_run',
           }
           (candidate / 'ACCEPTANCE.json').write_text(json.dumps(state, indent=2) + '\n')

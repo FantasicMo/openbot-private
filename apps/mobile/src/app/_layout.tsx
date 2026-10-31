@@ -179,6 +179,18 @@ function RootNavigator() {
                     }}
                   />
                 </Stack.Protected>
+                <Stack.Protected guard={isPrivateBuild} redirectTo="/">
+                  <Stack.Screen
+                    name="private-support"
+                    options={{
+                      title: t("mobile.app.route.support"),
+                      headerShown: true,
+                      presentation: "formSheet",
+                      sheetAllowedDetents: [0.85],
+                      sheetGrabberVisible: true,
+                    }}
+                  />
+                </Stack.Protected>
                 <Stack.Screen name="incoming-link" options={{ headerShown: false }} />
                 <Stack.Screen name="incoming-share" options={{ headerShown: false }} />
               </Stack>

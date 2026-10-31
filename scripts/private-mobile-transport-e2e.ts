@@ -24,9 +24,16 @@ import { agentEventCanNotify } from "@openbot/team-client/agent-notifications";
 import { MOBILE_ATTACHMENT_BYTES } from "@openbot/team-client/remote-peer";
 import { Effect } from "effect";
 import { type WebSocket, WebSocketServer } from "ws";
-import { MAX_PRIVATE_HOSTS, PrivateMobileError } from "../apps/mobile/src/features/private-access/private-contracts";
+import {
+  MAX_PRIVATE_HOSTS,
+  PrivateMobileError,
+  privatePairingDiagnosticCode,
+} from "../apps/mobile/src/features/private-access/private-contracts";
 import { PrivateHostStore } from "../apps/mobile/src/features/private-access/private-host-store";
-import { PrivateHttpTransport } from "../apps/mobile/src/features/private-access/private-http-transport";
+import {
+  PrivateHttpTransport,
+  verifyPrivateHost,
+} from "../apps/mobile/src/features/private-access/private-http-transport";
 import type { PrivateNetworkPort } from "../apps/mobile/src/features/private-access/private-ports";
 import {
   type MobileAgentActivities,
@@ -469,7 +476,11 @@ async function main() {
       losePairResponse = true;
       await assert.rejects(
         hosts.pair(JSON.stringify(offer)),
-        (error) => error instanceof Error && error.message === "Fixture lost pairing response",
+        (error) =>
+          error instanceof PrivateMobileError &&
+          error.code === "network" &&
+          privatePairingDiagnosticCode(error) === "redemption-request" &&
+          !error.message.includes("Fixture lost pairing response"),
       );
       assert.ok(
         store.listMembers().some((member) => member.username === hosts.state().pending?.username.toLowerCase()),
@@ -574,6 +585,39 @@ async function main() {
       assert.equal(capacityWrites, beforeWrites);
       assert.equal(networkPaths.length, beforeNetwork);
       assert.equal(capacityHosts.host(identity.serverId).hostName, previous.hostName);
+    });
+    await step("pairing_diagnostics_keep_fixed_stage_status_without_raw_failure", async () => {
+      const sensitive = "fixture-cause-with-offer-and-credential-must-not-escape";
+      const check = (stage: string, code: string) => (cause: unknown) => {
+        assert.ok(cause instanceof PrivateMobileError);
+        assert.equal(cause.code, code);
+        assert.equal(privatePairingDiagnosticCode(cause), stage);
+        assert.equal(JSON.stringify(cause).includes(sensitive), false);
+        assert.equal(cause.message.includes(sensitive), false);
+        assert.equal(Object.hasOwn(cause, "cause"), false);
+        return true;
+      };
+      const host = hosts.host(identity.serverId);
+      await assert.rejects(
+        verifyPrivateHost(
+          {
+            ...network,
+            fetch: async () => {
+              throw new Error(sensitive);
+            },
+          },
+          host,
+        ),
+        check("identity-request", "network"),
+      );
+      await assert.rejects(
+        verifyPrivateHost({ ...network, fetch: async () => new Response(sensitive, { status: 503 }) }, host),
+        check("identity-request/503", "identity"),
+      );
+      await assert.rejects(
+        verifyPrivateHost({ ...network, fetch: async () => new Response(sensitive, { status: 200 }) }, host),
+        check("identity-body/200", "pair"),
+      );
     });
     await step("connect_auth_protocol_capabilities_and_runtime_snapshot", async () => {
       await transport.connect(identity.serverId, identity.publicKey);

@@ -10,6 +10,7 @@ export const messages = defineMessages("mobile.private", {
   "mobile.private.addHost": "Add private host",
   "mobile.private.forgetHost": "Forget host",
   "mobile.private.device": "This device",
+  "mobile.private.diagnosticCode": "Diagnostic code: {code}",
   "mobile.private.error.invalidOffer": "This private pairing offer is invalid.",
   "mobile.private.error.expiredOffer": "This pairing offer has expired. Create a new one on the computer.",
   "mobile.private.error.identity": "The host identity could not be verified.",

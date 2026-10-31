@@ -8,6 +8,8 @@ import {
   PrivateMobileError,
   type PrivateMobileState,
   type PrivatePairedHost,
+  type PrivatePairingStage,
+  privatePairingFailure,
 } from "./private-contracts";
 import { boundedText, privateTeamHeaders, verifyPrivateHost } from "./private-http-transport";
 import type { PrivateHostPort, PrivateNetworkPort, PrivateStoragePort } from "./private-ports";
@@ -78,6 +80,8 @@ export class PrivateHostStore implements PrivateHostPort {
   async pair(value: string): Promise<PrivatePairedHost> {
     if (this.#pairing) throw new PrivateMobileError("pair");
     this.#pairing = true;
+    let stage: PrivatePairingStage = "offer-check";
+    let status: number | undefined;
     try {
       // Parsing still validates the full offer and pin. Expiry is checked after the exact saved
       // pending offer can be identified, so an explicit retry can recover a committed credential.
@@ -100,6 +104,7 @@ export class PrivateHostStore implements PrivateHostPort {
       if (existing && existing.hostPublicKey !== offer.hostPublicKey) throw new PrivateMobileError("identity");
       if (!existing && this.state().hosts.length >= MAX_PRIVATE_HOSTS) throw new PrivateMobileError("pair");
       await verifyPrivateHost(this.#network, offer, this.#appVersion);
+      stage = "credential-random";
       const pending =
         saved && recovering
           ? saved
@@ -108,11 +113,13 @@ export class PrivateHostStore implements PrivateHostPort {
               username: `mobile-${bytesToBase64Url(this.#network.randomBytes(18))}`,
               password: bytesToBase64Url(this.#network.randomBytes(32)),
             };
+      stage = "pending-save";
       await this.#save((state) => ({ ...state, pending }));
       let response: Response | null = null;
       // This is an explicit user retry. Recover a committed pairing through its saved device
       // credentials before asking a single-use offer to create another member.
       if (recovering) {
+        stage = "recovery-request";
         response = await this.#network.fetch(new URL("/v1/auth/login", offer.publicOrigin).toString(), {
           method: "POST",
           redirect: "error",
@@ -120,12 +127,16 @@ export class PrivateHostStore implements PrivateHostPort {
           headers: { ...privateTeamHeaders(this.#appVersion), "Content-Type": "application/json" },
           body: JSON.stringify({ username: pending.username, password: pending.password }),
         });
+        status = response.status;
         if (response.status === 401) {
           if (expired) throw new PrivateMobileError("expiredOffer");
           response = null;
         } else if (!response.ok) throw new PrivateMobileError("pair");
       }
+      stage = "offer-check";
       if (response === null && Date.parse(offer.expiresAt) <= this.#now()) throw new PrivateMobileError("expiredOffer");
+      stage = "redemption-request";
+      status = undefined;
       response ??= await this.#network.fetch(new URL(PRIVATE_PAIRING_PATH, offer.publicOrigin).toString(), {
         method: "POST",
         redirect: "error",
@@ -138,8 +149,12 @@ export class PrivateHostStore implements PrivateHostPort {
           password: pending.password,
         }),
       });
+      status = response.status;
       if (!response.ok) throw new PrivateMobileError("pair");
-      const authentication = decodePrivateAuthentication(JSON.parse(await boundedText(response, 32 * 1024)));
+      stage = "authentication-body";
+      const authenticationBody = JSON.parse(await boundedText(response, 32 * 1024));
+      stage = "authentication-check";
+      const authentication = decodePrivateAuthentication(authenticationBody);
       const host: PrivatePairedHost = {
         hostId: offer.hostId,
         hostName: offer.hostName,
@@ -150,11 +165,14 @@ export class PrivateHostStore implements PrivateHostPort {
         password: pending.password,
         ...authentication,
       };
+      stage = "complete-save";
       await this.#save((state) => ({
         deviceId: state.deviceId,
         hosts: [...state.hosts.filter((item) => item.hostId !== host.hostId), host],
       }));
       return host;
+    } catch (cause) {
+      throw privatePairingFailure(cause, stage, status);
     } finally {
       this.#pairing = false;
     }
