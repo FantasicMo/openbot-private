@@ -148,11 +148,22 @@ jobs:
           OPENBOT_ANDROID_STORE_PASSWORD: ${{ secrets.PRIVATE_ANDROID_STORE_PASSWORD }}
           OPENBOT_ANDROID_KEY_ALIAS: ${{ secrets.PRIVATE_ANDROID_KEY_ALIAS }}
           OPENBOT_ANDROID_KEY_PASSWORD: ${{ secrets.PRIVATE_ANDROID_KEY_PASSWORD }}
+          CERT_SHA256: ${{ vars.PRIVATE_ANDROID_CERT_SHA256 }}
         run: |
           set -euo pipefail
           umask 077
           trap 'rm -f "$OPENBOT_ANDROID_KEYSTORE_PATH"' EXIT
           printf '%s' "$KEYSTORE_BASE64" | base64 --decode > "$OPENBOT_ANDROID_KEYSTORE_PATH"
+          keytool -exportcert -keystore "$OPENBOT_ANDROID_KEYSTORE_PATH" \
+            -storepass:env OPENBOT_ANDROID_STORE_PASSWORD -alias "$OPENBOT_ANDROID_KEY_ALIAS" \
+            -file "$CANDIDATE_DIR/signing-certificate.der" > /dev/null
+          expected="$(printf '%s' "$CERT_SHA256" | tr -d ':' | tr '[:upper:]' '[:lower:]')"
+          actual="$(sha256sum "$CANDIDATE_DIR/signing-certificate.der" | cut -d ' ' -f 1)"
+          printf 'Injected keystore certificate SHA-256: %s\n' "$actual"
+          if [[ "$actual" != "$expected" ]]; then
+            printf 'The injected keystore certificate does not match PRIVATE_ANDROID_CERT_SHA256. Expected SHA-256: %s\n' "$expected" >&2
+            exit 1
+          fi
           ./gradlew app:assembleRelease --no-daemon --no-configuration-cache --max-workers=2 \
             -PreactNativeArchitectures=arm64-v8a,x86_64
           cp app/build/outputs/apk/release/app-release.apk "$CANDIDATE_DIR/openbot-private.apk"
@@ -166,12 +177,15 @@ jobs:
           tools_dir="$(printf '%s\n' "$ANDROID_HOME"/build-tools/* | sort -V | tail -n 1)"
           apk="$CANDIDATE_DIR/openbot-private.apk"
           "$tools_dir/apksigner" verify --verbose --print-certs "$apk" > "$CANDIDATE_DIR/signature.txt"
-          expected="$(printf '%s' "$CERT_SHA256" | tr -d ':' | tr '[:upper:]' '[:lower:]')"
-          actual="$(sed -n 's/^Signer #1 certificate SHA-256 digest: //p' "$CANDIDATE_DIR/signature.txt" | tr '[:upper:]' '[:lower:]')"
-          if [[ "$actual" != "$expected" ]]; then
-            echo 'The APK signing certificate does not match PRIVATE_ANDROID_CERT_SHA256.' >&2
-            exit 1
-          fi
+          python3 - <<'PY'
+          import os, runpy
+          from pathlib import Path
+          candidate = Path(os.environ['CANDIDATE_DIR'])
+          verify = runpy.run_path('scripts/private-android-emulator-smoke.py')['apk_signer_certificate_fingerprint']
+          certificate = verify((candidate / 'signature.txt').read_text(), os.environ['CERT_SHA256'])
+          (candidate / 'apk-signing-certificate.sha256').write_text(certificate + '\n')
+          print('Verified APK signer certificate SHA-256: ' + certificate)
+          PY
           "$tools_dir/aapt" dump badging "$apk" > "$CANDIDATE_DIR/apk-badging.txt"
           if ! head -n 1 "$CANDIDATE_DIR/apk-badging.txt" | grep -Fq "name='io.github.fantasicmo.openbot' versionCode='$OPENBOT_ANDROID_VERSION_CODE'"; then
             echo 'The APK application ID or versionCode is incorrect.' >&2
@@ -231,6 +245,26 @@ jobs:
             echo 'Packaging evidence only. The independent emulator job reports startup smoke; real-host and phone acceptance remain pending.'
             echo 'Nothing was published to a release, store, or update service.'
           } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Mark failed build diagnostics as not accepted
+        if: failure() && env.CANDIDATE_DIR != ''
+        shell: bash
+        run: |
+          mkdir -p "$CANDIDATE_DIR"
+          {
+            echo 'NOT ACCEPTED: this job failed. Any APK in this artifact is for diagnostics only.'
+            echo "Commit: $GITHUB_SHA; run: $GITHUB_RUN_ID; attempt: $GITHUB_RUN_ATTEMPT."
+            echo 'Signing certificate files contain public certificate data only.'
+          } > "$CANDIDATE_DIR/BUILD-FAILED.txt"
+
+      - name: Upload failed build diagnostics
+        if: failure() && env.CANDIDATE_DIR != ''
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: private-android-build-diagnostics-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ env.CANDIDATE_DIR }}
+          if-no-files-found: ignore
+          retention-days: 7
 
   emulator:
     name: Smoke test the same signed release APK

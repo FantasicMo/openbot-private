@@ -19,6 +19,40 @@ SERIAL = "emulator-5554"
 CHAIN = "OPENBOT_PRIVATE_SMOKE"
 
 
+def apk_signer_certificate_fingerprint(signature, expected):
+    """Accept legacy and Build Tools 37 signer labels; keep every app signer pinned."""
+    certificate = re.sub(r":", "", expected).strip().lower()
+    if not re.fullmatch(r"[a-f0-9]{64}", certificate):
+        raise RuntimeError("The expected APK certificate fingerprint is missing.")
+    # AOSP Android 17 signer-label source:
+    # https://android.googlesource.com/platform/tools/apksig/+/refs/heads/android17-release/src/apksigner/java/com/android/apksigner/ApkSignerTool.java#763
+    # Source-format example, not a captured candidate: V3.0 Signer: certificate SHA-256 digest: <hex>
+    # Rotation can add an SDK range after the signer label.
+    # Source Stamp certificates identify the stamp, not the application's signer.
+    pattern = re.compile(
+        r"(?:V[123](?:\.\d+)? )?Signer(?: #\d+)?:?(?: \([^\r\n]+\))?"
+        r" certificate SHA-256 digest: ([a-fA-F0-9]{64})[ \t]*"
+    )
+    fingerprints = set()
+    for line in signature.splitlines():
+        if "certificate SHA-256 digest:" not in line:
+            continue
+        if re.fullmatch(r"Source Stamp Signer:? certificate SHA-256 digest: [a-fA-F0-9]{64}[ \t]*", line):
+            continue
+        match = pattern.fullmatch(line)
+        if match is None:
+            raise RuntimeError("The APK certificate output has an unsupported signer label.")
+        fingerprints.add(match.group(1).lower())
+    if not fingerprints:
+        raise RuntimeError("The APK certificate output contains no application signer.")
+    if fingerprints != {certificate}:
+        raise RuntimeError(
+            "The APK certificate does not match the private release signer. "
+            f"Expected SHA-256: {certificate}; actual SHA-256: {', '.join(sorted(fingerprints))}."
+        )
+    return certificate
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--candidate-dir", required=True, type=Path)
@@ -114,15 +148,10 @@ def main():
             with zipfile.ZipFile(apk) as archive:
                 if archive.getinfo("assets/index.android.bundle").file_size == 0:
                     raise RuntimeError("The release APK has no embedded JavaScript.")
-            certificate = re.sub(r":", "", os.environ.get("CERT_SHA256", "")).lower()
-            if not re.fullmatch(r"[a-f0-9]{64}", certificate):
-                raise RuntimeError("The expected APK certificate fingerprint is missing.")
             tools = sorted((sdk / "build-tools").iterdir(), key=lambda path: tuple(map(int, re.findall(r"\d+", path.name))))[-1]
             signature = run([tools / "apksigner", "verify", "--verbose", "--print-certs", apk]).stdout.decode()
             (output / "signature.txt").write_text(signature)
-            found = re.search(r"^Signer #1 certificate SHA-256 digest: ([a-fA-F0-9]+)$", signature, re.MULTILINE)
-            if not found or found.group(1).lower() != certificate:
-                raise RuntimeError("The APK certificate does not match the private release signer.")
+            certificate = apk_signer_certificate_fingerprint(signature, os.environ.get("CERT_SHA256", ""))
             report["certificateSha256"] = certificate
 
         record("same_signed_release_apk_hash_and_embedded_bundle", verify_apk)

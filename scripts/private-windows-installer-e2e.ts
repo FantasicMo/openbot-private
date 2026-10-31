@@ -72,10 +72,43 @@ const reportPath = join(output, "report.json");
 const logger = createOpenBotLogger("private-windows-installer-e2e", () => undefined);
 const publicOrigin = "https://private-windows-ci.invalid";
 const publicHost = new URL(publicOrigin).host;
+type WaitPhase =
+  | "installer_exit"
+  | "uninstaller_exit"
+  | "owned_app_exit"
+  | "cdp_disconnect"
+  | "cdp_http_ready"
+  | "cdp_renderer_connect"
+  | "private_host_ready"
+  | "event_runtime_snapshot"
+  | "revoked_socket_closed";
+interface SafeFailure {
+  code: string;
+  phase?: WaitPhase;
+  errorName?: string;
+  systemCode?: string;
+  commandExitCode?: number;
+  assertionOperator?: string;
+  timeoutMs?: number;
+  exitCode?: number | null;
+  expectedExitCode?: number;
+  signal?: NodeJS.Signals | null;
+  httpStatus?: number;
+  expectedHttpStatus?: number;
+  hostPhase?: "error" | "local-only" | "starting" | "ready";
+}
+class SmokeFailure extends Error {
+  constructor(readonly details: SafeFailure) {
+    super(details.code);
+    this.name = "SmokeFailure";
+  }
+}
 const report: {
   passed: boolean;
   scope: string;
-  steps: { name: string; passed: boolean }[];
+  steps: { name: string; passed: boolean; durationMs: number; failure?: SafeFailure }[];
+  failure?: { step: string } & SafeFailure;
+  cleanupFailures: ({ operation: "login_item" | "owned_app" } & SafeFailure)[];
   officialDataChecks: {
     scope: "CI_sentinel_files_only";
     sentinels: { area: string; sha256: string; rootExistedBefore: boolean }[];
@@ -87,6 +120,7 @@ const report: {
   passed: false,
   scope: "installed_private_Windows_Electron_real_HostService_TeamApiServer_TeamStore_and_gateway",
   steps: [],
+  cleanupFailures: [],
   officialDataChecks: { scope: "CI_sentinel_files_only", sentinels: [], verifiedAfter: [] },
   loginItemChecks: { scope: "CI_private_AUMID_only", preservedProfileWithSpaces: false, removed: false },
   unverified: [
@@ -113,6 +147,7 @@ const statusSchema = Schema.Struct({
   hostId: Schema.NullOr(Schema.String),
   publicOrigin: Schema.NullOr(Schema.String),
   gatewayPort: Schema.NullOr(Schema.Number),
+  errorCode: Schema.NullOr(Schema.String),
 });
 const acceptedSchema = Schema.Struct({
   member: Schema.Struct({ id: Schema.String, role: Schema.String }),
@@ -125,15 +160,83 @@ const loginRegistrationSchema = Schema.Struct({
   approval: Schema.NullOr(Schema.String),
 });
 
+function safeFailure(error: unknown): SafeFailure {
+  if (error instanceof SmokeFailure) return error.details;
+  const failure: SafeFailure = { code: "operation_failed" };
+  if (error instanceof Error) {
+    failure.errorName = [
+      "Error",
+      "TypeError",
+      "RangeError",
+      "SyntaxError",
+      "TimeoutError",
+      "AbortError",
+      "AssertionError",
+    ].includes(error.name)
+      ? error.name
+      : "Error";
+    if (
+      "code" in error &&
+      typeof error.code === "string" &&
+      ["ENOENT", "EACCES", "EPERM", "ETIMEDOUT", "ECONNREFUSED", "ECONNRESET", "EADDRINUSE", "ABORT_ERR"].includes(
+        error.code,
+      )
+    )
+      failure.systemCode = error.code;
+    if ("status" in error && typeof error.status === "number" && Number.isInteger(error.status))
+      failure.commandExitCode = error.status;
+  }
+  if (error instanceof assert.AssertionError) {
+    failure.code = "assertion_failed";
+    failure.assertionOperator = [
+      "==",
+      "!=",
+      "===",
+      "!==",
+      "strictEqual",
+      "deepStrictEqual",
+      "notStrictEqual",
+      "notDeepStrictEqual",
+      "match",
+      "ok",
+    ].includes(error.operator)
+      ? error.operator
+      : "other";
+  }
+  return failure;
+}
+
+async function within<A>(phase: WaitPhase, timeoutMs: number, action: () => Promise<A>): Promise<A> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      action(),
+      new Promise<never>((_resolve, reject) => {
+        timer = setTimeout(() => reject(new SmokeFailure({ code: "timeout", phase, timeoutMs })), timeoutMs);
+      }),
+    ]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 async function step<A>(name: string, action: () => Promise<A>): Promise<A> {
+  const started = performance.now();
+  process.stdout.write(`${JSON.stringify({ step: name, state: "started" })}\n`);
   try {
     const result = await action();
-    report.steps.push({ name, passed: true });
+    const durationMs = Math.round(performance.now() - started);
+    report.steps.push({ name, passed: true, durationMs });
+    process.stdout.write(`${JSON.stringify({ step: name, state: "passed", durationMs })}\n`);
     return result;
-  } catch {
-    report.steps.push({ name, passed: false });
-    // No upstream error, page text, request body or credential is copied into the report or log.
-    throw new Error(`The ${name} step failed.`);
+  } catch (error) {
+    const failure = safeFailure(error);
+    const durationMs = Math.round(performance.now() - started);
+    report.steps.push({ name, passed: false, durationMs, failure });
+    report.failure ??= { step: name, ...failure };
+    // Keep fixed diagnostics, not messages, actual assertion values, page text or credentials.
+    process.stdout.write(`${JSON.stringify({ step: name, state: "failed", durationMs, ...failure })}\n`);
+    throw error;
   }
 }
 
@@ -239,13 +342,14 @@ async function runInstaller(file: string, argumentsText: string): Promise<void> 
     windowsHide: true,
     stdio: "ignore",
   });
-  const [code] = await once(installerProcess, "exit", { signal: AbortSignal.timeout(300_000) }).catch(
-    (error: unknown) => {
-      if (installerProcess.exitCode === null) installerProcess.kill();
-      throw error;
-    },
-  );
-  assert.equal(code, 0, "The silent private installer must exit successfully.");
+  const phase = file === uninstaller ? "uninstaller_exit" : "installer_exit";
+  const [code, signal] = await within(phase, 300_000, () => once(installerProcess, "exit")).catch((error: unknown) => {
+    if (installerProcess.exitCode === null && installerProcess.signalCode === null) installerProcess.kill();
+    if (error instanceof SmokeFailure) throw error;
+    throw new SmokeFailure({ ...safeFailure(error), code: "installer_spawn_failed", phase });
+  });
+  if (code !== 0)
+    throw new SmokeFailure({ code: "installer_exit_nonzero", phase, exitCode: code, signal, expectedExitCode: 0 });
 }
 
 async function unusedPort(): Promise<number> {
@@ -258,14 +362,19 @@ async function unusedPort(): Promise<number> {
   return address.port;
 }
 
-async function until(ready: () => boolean | Promise<boolean>): Promise<void> {
+async function until(phase: WaitPhase, ready: () => boolean | Promise<boolean>): Promise<void> {
   const limit = Date.now() + 180_000;
-  while (!(await ready())) {
-    if (launchFailed) throw new Error("The owned app could not start.");
-    if (child && (child.exitCode !== null || child.signalCode !== null)) throw new Error("The owned app exited.");
-    if (Date.now() >= limit) throw new Error("The requested application state did not arrive.");
-    await poll(150);
-  }
+  await within(phase, 180_000, async () => {
+    while (true) {
+      // The outer deadline also covers a stalled callback. Stop the poll when it returns later.
+      if (Date.now() >= limit) throw new SmokeFailure({ code: "timeout", phase, timeoutMs: 180_000 });
+      if (launchFailed) throw new SmokeFailure({ code: "app_spawn_failed", phase });
+      if (child && (child.exitCode !== null || child.signalCode !== null))
+        throw new SmokeFailure({ code: "owned_app_exited", phase, exitCode: child.exitCode, signal: child.signalCode });
+      if (await ready()) return;
+      await poll(150);
+    }
+  });
 }
 
 async function startApp(userDataDirectory?: string, fromLoginItem = false): Promise<void> {
@@ -297,7 +406,7 @@ async function startApp(userDataDirectory?: string, fromLoginItem = false): Prom
   child.once("error", () => {
     launchFailed = true;
   });
-  await until(async () => {
+  await until("cdp_http_ready", async () => {
     try {
       const response = await fetch(`http://127.0.0.1:${port}/json/version`, { signal: AbortSignal.timeout(2_000) });
       return response.ok;
@@ -305,7 +414,7 @@ async function startApp(userDataDirectory?: string, fromLoginItem = false): Prom
       return false;
     }
   });
-  await until(async () => {
+  await until("cdp_renderer_connect", async () => {
     try {
       session = await connectToDevApp(port, logger, {
         ownerPid: child?.pid,
@@ -316,11 +425,21 @@ async function startApp(userDataDirectory?: string, fromLoginItem = false): Prom
       return false;
     }
   });
-  await until(async () => {
+  await until("private_host_ready", async () => {
     try {
       const status = await ipc("window.openbot.privateAccess.status()", statusSchema);
+      if (status.phase === "error")
+        throw new SmokeFailure({
+          code:
+            status.errorCode === "invalid_configuration"
+              ? "private_invalid_configuration"
+              : "private_gateway_start_failed",
+          phase: "private_host_ready",
+          hostPhase: "error",
+        });
       return status.enabled && status.hostId !== null;
-    } catch {
+    } catch (error) {
+      if (error instanceof SmokeFailure) throw error;
       return false;
     }
   });
@@ -330,19 +449,44 @@ async function stopApp(): Promise<void> {
   for (const socket of sockets.splice(0)) socket.terminate();
   const attached = session;
   session = null;
-  if (attached) await attached.close().catch(() => undefined);
   const owned = child;
-  child = null;
-  activeProfileDirectory = null;
-  if (!owned || owned.exitCode !== null || owned.signalCode !== null || owned.pid === undefined) return;
-  // Only the PID returned by this script's spawn, including its own child tree.
-  const exited = once(owned, "exit", { signal: AbortSignal.timeout(30_000) });
+  let failure: unknown;
   try {
-    execFileSync("taskkill.exe", ["/PID", String(owned.pid), "/T", "/F"], { stdio: "ignore" });
-  } catch {
-    if (owned.exitCode === null && owned.signalCode === null) throw new Error("The owned app did not stop.");
+    if (owned && owned.exitCode === null && owned.signalCode === null && owned.pid !== undefined) {
+      // Attach before taskkill. A failed command can race with an already-exiting owned process.
+      const exited = once(owned, "exit", { signal: AbortSignal.timeout(30_000) }).then(
+        () => null,
+        (error: unknown) => safeFailure(error),
+      );
+      let commandFailure: SafeFailure | undefined;
+      try {
+        // Only the PID returned by this script's spawn, including its own child tree.
+        execFileSync("taskkill.exe", ["/PID", String(owned.pid), "/T", "/F"], { stdio: "ignore", timeout: 15_000 });
+      } catch (error) {
+        commandFailure = safeFailure(error);
+      }
+      const exitFailure = await exited;
+      if (exitFailure)
+        throw new SmokeFailure({
+          ...commandFailure,
+          code: "owned_app_exit_unconfirmed",
+          phase: "owned_app_exit",
+          timeoutMs: 30_000,
+        });
+    }
+    // Keep the owned PID available to final cleanup until its exit is confirmed.
+    child = null;
+    activeProfileDirectory = null;
+  } catch (error) {
+    failure = error;
   }
-  await exited;
+  try {
+    // Stop the owned app before waiting for CDP. A stalled disconnect must not block termination.
+    if (attached) await within("cdp_disconnect", 10_000, () => attached.close().catch(() => undefined));
+  } catch (error) {
+    failure ??= error;
+  }
+  if (failure !== undefined) throw failure;
 }
 
 async function ipc<A>(expression: string, schema: Schema.Decoder<A>): Promise<A> {
@@ -534,7 +678,7 @@ async function main(): Promise<void> {
         }),
       );
       socket.send(encodeTeamProtocolV1CurrentClientEvent({ type: "runtime-snapshot-request" }));
-      await until(() => snapshot || invalidEvent);
+      await until("event_runtime_snapshot", () => snapshot || invalidEvent);
       assert.equal(invalidEvent, false);
       return socket;
     };
@@ -547,7 +691,7 @@ async function main(): Promise<void> {
       `window.openbot.privateAccess.revokeDevice(${JSON.stringify({ memberId: deviceA.member.id })})`,
       statusSchema,
     );
-    await until(() => socketA.readyState === WebSocket.CLOSED);
+    await until("revoked_socket_closed", () => socketA.readyState === WebSocket.CLOSED);
     assert.equal(socketB.readyState, WebSocket.OPEN);
     const revoked = await request(TEAM_API_ROUTES.me, deviceA.sessionToken);
     assert.equal(revoked.status, 401);
@@ -556,19 +700,44 @@ async function main(): Promise<void> {
     assert.equal(retained.status, 200);
     await retained.body?.cancel();
   });
-  await step("reinstall_same_candidate_preserves_host_profile_and_device_B", async () => {
-    await stopApp();
-    await runInstaller(installer, "/S");
-    await startApp();
+  await step("stop_owned_app_before_reinstall", stopApp);
+  await step("reinstall_same_candidate_exits_successfully", () => runInstaller(installer, "/S"));
+  await step("restart_owned_app_after_reinstall", () => startApp());
+  await step("reinstall_preserves_host_identity", async () => {
     const status = await ipc("window.openbot.privateAccess.status()", statusSchema);
     assert.equal(status.hostId, first.hostId);
-    assert.equal(status.phase, "ready");
+  });
+  await step("reinstall_restores_configured_gateway_ready", async () => {
+    const status = await ipc("window.openbot.privateAccess.status()", statusSchema);
+    if (status.phase !== "ready")
+      throw new SmokeFailure({
+        code: "private_gateway_not_ready_after_reinstall",
+        hostPhase:
+          status.phase === "local-only" || status.phase === "starting" || status.phase === "error"
+            ? status.phase
+            : undefined,
+      });
+  });
+  await step("reinstall_preserves_private_profile_canary", async () => {
     assert.equal(await readFile(profileCanary, "utf8"), "private profile persistence\n");
+  });
+  await step("reinstall_preserves_private_workspace_canary", async () => {
     assert.equal(await readFile(workspaceCanary, "utf8"), "private workspace persistence\n");
+  });
+  await step("reinstall_preserves_device_B_authenticated_session", async () => {
     const retained = await request(TEAM_API_ROUTES.me, deviceB.sessionToken);
-    assert.equal(retained.status, 200);
     await retained.body?.cancel();
-    await assertOfficialDataUnchanged("reinstall");
+    if (retained.status !== 200)
+      throw new SmokeFailure({
+        code: "device_B_session_not_preserved",
+        httpStatus: retained.status,
+        expectedHttpStatus: 200,
+      });
+  });
+  await step("reinstall_preserves_official_protocol_and_data_sentinels", () =>
+    assertOfficialDataUnchanged("reinstall"),
+  );
+  await step("capture_reinstalled_private_app_screenshot", async () => {
     assert.ok(session);
     await session.page.screenshot({ path: join(output, "installed-app.png") });
   });
@@ -614,14 +783,17 @@ async function main(): Promise<void> {
 
 try {
   await main();
-} catch {
+} catch (error) {
+  report.failure ??= { step: "outside_named_step", ...safeFailure(error) };
   process.exitCode = 1;
 } finally {
-  await removeOwnedLoginItem().catch(() => {
+  await removeOwnedLoginItem().catch((error: unknown) => {
+    report.cleanupFailures.push({ operation: "login_item", ...safeFailure(error) });
     process.exitCode = 1;
     report.passed = false;
   });
-  await stopApp().catch(() => {
+  await stopApp().catch((error: unknown) => {
+    report.cleanupFailures.push({ operation: "owned_app", ...safeFailure(error) });
     process.exitCode = 1;
     report.passed = false;
   });
