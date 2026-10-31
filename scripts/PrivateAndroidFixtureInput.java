@@ -101,6 +101,9 @@ public final class PrivateAndroidFixtureInput {
             Class<?> handlerClass = Class.forName("android.os.HandlerThread");
             handlerThread = handlerClass.getConstructor(String.class).newInstance("OpenBotFixtureInput");
             ((Thread) handlerThread).start();
+            // Match the Android 16 stock shell: prepare the main Looper; callbacks use HandlerThread.
+            // https://raw.githubusercontent.com/aosp-mirror/platform_frameworks_base/android16-release/cmds/uiautomator/library/testrunner-src/com/android/uiautomator/core/UiAutomationShellWrapper.java
+            Class.forName("android.os.Looper").getMethod("prepareMainLooper").invoke(null);
             Object looper = handlerClass.getMethod("getLooper").invoke(handlerThread);
             Object connection = Class.forName("android.app.UiAutomationConnection").getConstructor().newInstance();
             Class<?> automationClass = Class.forName("android.app.UiAutomation");
