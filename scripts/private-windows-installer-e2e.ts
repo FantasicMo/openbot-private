@@ -78,6 +78,7 @@ type WaitPhase =
   | "installer_exit"
   | "uninstaller_exit"
   | "owned_app_exit"
+  | "owned_app_graceful_exit"
   | "cdp_disconnect"
   | "cdp_http_ready"
   | "cdp_renderer_connect"
@@ -127,6 +128,17 @@ interface LaunchEvidence {
   processMainErrors: string[];
   diagnosticFailures: SafeFailure[];
 }
+interface StopEvidence {
+  pid: number;
+  requireGraceful: boolean;
+  cdpOwnerVerified: boolean;
+  quitRequested: boolean;
+  normalExit: boolean;
+  forcedCleanup: boolean;
+  exitCode: number | null;
+  signal: NodeJS.Signals | null;
+  gracefulFailure?: SafeFailure;
+}
 const report: {
   passed: boolean;
   scope: string;
@@ -134,6 +146,8 @@ const report: {
   failure?: { step: string } & SafeFailure;
   cleanupFailures: ({ operation: "login_item" | "owned_app" } & SafeFailure)[];
   launches: LaunchEvidence[];
+  stops: StopEvidence[];
+  encryptionState?: { localStateSha256: string; ownerFileSha256: string; encryptedKeyPresent: boolean };
   officialDataChecks: {
     scope: "CI_sentinel_files_only";
     sentinels: { area: string; sha256: string; rootExistedBefore: boolean }[];
@@ -147,13 +161,14 @@ const report: {
   steps: [],
   cleanupFailures: [],
   launches: [],
+  stops: [],
   officialDataChecks: { scope: "CI_sentinel_files_only", sentinels: [], verifiedAfter: [] },
   loginItemChecks: { scope: "CI_private_AUMID_only", preservedProfileWithSpaces: false, removed: false },
   unverified: [
     "Tailscale Serve HTTPS trust, ACLs, LAN routing, Clash coexistence and physical devices.",
     "Android native runtime, UI, file transfers and model-provider execution.",
     "Remote desktop/browser streaming resources and migration from an older private release.",
-    "A forced process restart is tested; normal tray shutdown and power-loss durability are separate checks.",
+    "Lifecycle checks require verified CDP normal quit. Tray interaction, hard-crash and power-loss durability are separate checks.",
     "Unsigned internal candidate: no Authenticode publisher identity or SmartScreen acceptance is established.",
     "Official data preservation covers two CI-created sentinel files; other pre-existing official files are not inventoried.",
     "Login-item registration and stored-command relaunch are tested; an actual Windows sign-in is not tested.",
@@ -608,13 +623,58 @@ async function startApp(userDataDirectory?: string, fromLoginItem = false): Prom
   }
 }
 
-async function stopApp(): Promise<void> {
+async function stopApp(requireGraceful = false): Promise<void> {
   for (const socket of sockets.splice(0)) socket.terminate();
   const attached = session;
   session = null;
   const owned = child;
+  const stopped: StopEvidence | null =
+    owned?.pid === undefined
+      ? null
+      : {
+          pid: owned.pid,
+          requireGraceful,
+          cdpOwnerVerified: false,
+          quitRequested: false,
+          normalExit: false,
+          forcedCleanup: false,
+          exitCode: owned.exitCode,
+          signal: owned.signalCode,
+        };
+  if (stopped) report.stops.push(stopped);
   let failure: unknown;
   try {
+    if (owned && stopped && attached && owned.exitCode === null && owned.signalCode === null) {
+      const cancelExitWait = new AbortController();
+      const exited = once(owned, "exit", { signal: cancelExitWait.signal }).then(
+        () => true,
+        () => false,
+      );
+      try {
+        await within("owned_app_graceful_exit", 30_000, async () => {
+          stopped.cdpOwnerVerified = await verifyBrowserOwnership(attached.browser, stopped.pid);
+          if (!stopped.cdpOwnerVerified)
+            throw new SmokeFailure({ code: "graceful_quit_owner_not_verified", phase: "owned_app_graceful_exit" });
+          const probe = await attached.browser.newBrowserCDPSession();
+          stopped.quitRequested = true;
+          // Electron44 maps this to Browser::Quit/app.quit, but intentionally sends no protocol
+          // reply. Observe the exact child exit; Playwright browser.close only disconnects CDP.
+          void probe.send("Browser.close").catch(() => undefined);
+          if (!(await exited) || owned.exitCode !== 0)
+            throw new SmokeFailure({
+              code: "graceful_quit_exit_failed",
+              phase: "owned_app_graceful_exit",
+              exitCode: owned.exitCode,
+              signal: owned.signalCode,
+            });
+          stopped.normalExit = true;
+        });
+      } catch (error) {
+        stopped.gracefulFailure = safeFailure(error);
+      } finally {
+        cancelExitWait.abort();
+      }
+    }
     if (owned && owned.exitCode === null && owned.signalCode === null && owned.pid !== undefined) {
       // Attach before taskkill. A failed command can race with an already-exiting owned process.
       const exited = once(owned, "exit", { signal: AbortSignal.timeout(30_000) }).then(
@@ -623,6 +683,7 @@ async function stopApp(): Promise<void> {
       );
       let commandFailure: SafeFailure | undefined;
       try {
+        if (stopped) stopped.forcedCleanup = true;
         // Only the PID returned by this script's spawn, including its own child tree.
         execFileSync("taskkill.exe", ["/PID", String(owned.pid), "/T", "/F"], { stdio: "ignore", timeout: 15_000 });
       } catch (error) {
@@ -640,6 +701,8 @@ async function stopApp(): Promise<void> {
     // Keep the owned PID available to final cleanup until its exit is confirmed.
     child = null;
     activeProfileDirectory = null;
+    if (requireGraceful && !stopped?.normalExit)
+      throw new SmokeFailure({ code: "normal_quit_not_confirmed", phase: "owned_app_graceful_exit" });
   } catch (error) {
     failure = error;
   }
@@ -649,7 +712,24 @@ async function stopApp(): Promise<void> {
   } catch (error) {
     failure ??= error;
   }
+  if (stopped && owned) {
+    stopped.exitCode = owned.exitCode;
+    stopped.signal = owned.signalCode;
+  }
   if (failure !== undefined) throw failure;
+}
+
+async function profileEncryptionState() {
+  const localState = await readFile(join(profileDirectory, "Local State"));
+  const decoded = Schema.decodeUnknownSync(
+    Schema.Struct({ os_crypt: Schema.Struct({ encrypted_key: Schema.String.check(Schema.isMinLength(1)) }) }),
+  )(JSON.parse(localState.toString("utf8")));
+  const owner = await readFile(join(profileDirectory, "openbot-private-owner-v1.json"));
+  return {
+    localStateSha256: createHash("sha256").update(localState).digest("hex"),
+    ownerFileSha256: createHash("sha256").update(owner).digest("hex"),
+    encryptedKeyPresent: decoded.os_crypt.encrypted_key.length > 0,
+  };
 }
 
 async function ipc<A>(expression: string, schema: Schema.Decoder<A>): Promise<A> {
@@ -863,8 +943,16 @@ async function main(): Promise<void> {
     assert.equal(retained.status, 200);
     await retained.body?.cancel();
   });
-  await step("stop_owned_app_before_reinstall", stopApp);
+  await step("stop_owned_app_before_reinstall", () => stopApp(true));
+  const encryptionState = await step(
+    "normal_quit_persists_local_encryption_key_and_owner_file",
+    profileEncryptionState,
+  );
+  report.encryptionState = encryptionState;
   await step("reinstall_same_candidate_exits_successfully", () => runInstaller(installer, "/S"));
+  await step("reinstall_preserves_local_encryption_state_before_next_launch", async () => {
+    assert.deepEqual(await profileEncryptionState(), encryptionState);
+  });
   await step("restart_owned_app_after_reinstall", () => startApp());
   await step("reinstall_preserves_host_identity", async () => {
     const status = await ipc("window.openbot.privateAccess.status()", statusSchema);
@@ -905,7 +993,7 @@ async function main(): Promise<void> {
     await session.page.screenshot({ path: join(output, "installed-app.png") });
   });
   const loginHostId = await step("explicit_profile_with_spaces_does_not_enable_startup", async () => {
-    await stopApp();
+    await stopApp(true);
     await startApp(loginProfileDirectory);
     assert.ok(existsSync(join(loginProfileDirectory, "openbot-private-owner-v1.json")));
     assert.equal((await ipc("window.openbot.getAppBehaviorPreference()", behaviorSchema)).launchAtLogin, false);
@@ -922,7 +1010,7 @@ async function main(): Promise<void> {
     assert.deepEqual(privateLoginRegistration(), { command: expectedLoginCommand, approval: null });
   });
   await step("relaunch_from_stored_login_argument_preserves_profile_and_enabled_readback", async () => {
-    await stopApp();
+    await stopApp(true);
     await startApp(loginProfileDirectory, true);
     assert.equal((await ipc("window.openbot.privateAccess.status()", statusSchema)).hostId, loginHostId);
     assert.equal((await ipc("window.openbot.getAppBehaviorPreference()", behaviorSchema)).launchAtLogin, true);
@@ -931,7 +1019,7 @@ async function main(): Promise<void> {
   });
   await step("remove_only_CI_owned_private_login_item", removeOwnedLoginItem);
   await step("uninstall_only_owned_private_application_keeps_data", async () => {
-    await stopApp();
+    await stopApp(true);
     await runInstaller(uninstaller, `/S _?=${installDirectory}`);
     assert.ok(!existsSync(executable));
     assert.equal(await readFile(profileCanary, "utf8"), "private profile persistence\n");

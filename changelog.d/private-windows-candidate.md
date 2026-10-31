@@ -12,3 +12,7 @@ Tailscale TLS, providers, Android and streaming remain separate checks.
 
 - Record bounded, redacted startup errors and verified process/renderer state when the cloud
 installer smoke cannot restart the app. A diagnostic report does not mark a failed candidate as accepted.
+
+- Use verified normal app quit for installer restart checks, with a failing bounded cleanup fallback.
+Check the encrypted owner file and Windows encryption-key state before and after reinstall. Keep
+hard-crash and power-loss durability separate from normal restart acceptance.

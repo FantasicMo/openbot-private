@@ -31,8 +31,13 @@ connection to the installed application. It does not use the official installer 
 
 The smoke checks private build metadata, the signed-out account boundary, renderer Node isolation,
 real TeamStore pairing through the private gateway, authenticated Team API HTTP, event WebSocket
-subprotocols and runtime snapshots. It revokes device A while device B stays active. It then stops
-the owned process tree, reinstalls the same candidate, starts it again, checks host/session and
+subprotocols and runtime snapshots. It revokes device A while device B stays active. It then requests
+normal quit through verified CDP and waits for the exact owned process to exit. A bounded forced
+cleanup makes that lifecycle step fail. After quit, it checks that Windows `Local State` holds an
+encrypted key, and records only that file's hash and the encrypted owner file's hash. It reinstalls
+the same candidate and compares those files before the next launch. Chromium can change `Local State`
+during a normal launch, so the test does not require its hash to stay fixed across launches.
+The smoke then starts the app again, checks host/session and
 canary-file persistence, and uninstalls only that private application. The official protocol
 registration and the prepared official installation/data roots must remain unchanged. Before the
 first install, the disposable runner creates one harmless sentinel in each official profile and
@@ -50,8 +55,32 @@ and enabled setting. It then removes only the CI-created private item and verifi
 An existing private Run or StartupApproved value stops the smoke before any change. An actual
 Windows sign-in is a separate check; this smoke does not change this computer's login items.
 The report also excludes TLS/Serve, Android, remote desktop/browser streaming, older-release
-migration, normal tray shutdown, SmartScreen and Authenticode publisher acceptance. No owner secret,
+migration, tray interaction, hard-crash/power-loss durability, SmartScreen and Authenticode publisher acceptance. No owner secret,
 device credential, pairing offer, profile, raw application log or workspace is uploaded.
+
+The early forced-stop failure was reproduced without an installer using cached Electron 44.9.3 and
+new isolated Windows profiles: immediate process termination left the new encryption key absent
+from disk and the ciphertext could not be read on restart; normal `app.quit()` persisted the key
+and the same ciphertext decrypted. The installer smoke checks normal restart and update behavior.
+It does not claim that a new profile survives termination before Chromium commits its first key.
+
+## Recheck an existing Android APK
+
+`Validate existing private Android APK` (`private-android-artifact-acceptance.yml`) can rerun the
+emulator acceptance after a test-environment fix without compiling or signing another APK. Supply
+the original build run ID, immutable `private-android-build-*` artifact ID, full build commit,
+APK SHA-256 and versionCode. The artifact archive digest is not the APK hash.
+
+The workflow checks that the run and successful signed-build job belong to this repository and
+source commit, downloads that exact artifact, and checks the expected APK hash, fixed signer,
+private package, version and two native ABIs before emulator startup. Its evidence records the
+build and validator commits/runs separately and verifies that the APK hash is unchanged afterward.
+The Ubuntu runner installs `libpulse0`, which QEMU needs even with audio disabled.
+
+This is the same scoped startup smoke used by the candidate workflow. It does not establish
+real-host pairing, provider execution, upgrade preservation or phone/Clash Mi acceptance. A failed
+smoke keeps an explicitly unaccepted report. Successful startup evidence does not itself publish a
+release or replace the required physical-device checks.
 
 ## Download and retain accepted bytes
 

@@ -305,6 +305,9 @@ jobs:
           [[ "$RUNNER_ENVIRONMENT" == 'github-hosted' && "$RUNNER_OS" == 'Linux' ]]
           test -c /dev/kvm
           sudo chmod a+rw /dev/kvm
+          # QEMU links libpulse even for -no-audio and emulator -version.
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends libpulse0
           export PATH="$ANDROID_HOME/cmdline-tools/latest/bin:$ANDROID_HOME/platform-tools:$ANDROID_HOME/emulator:$PATH"
           printf '%s\n' "$ANDROID_HOME/cmdline-tools/latest/bin" "$ANDROID_HOME/platform-tools" "$ANDROID_HOME/emulator" >> "$GITHUB_PATH"
           printf 'Android SDK: %s\n' "$ANDROID_HOME"

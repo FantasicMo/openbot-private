@@ -58,11 +58,17 @@ def main():
     parser.add_argument("--candidate-dir", required=True, type=Path)
     parser.add_argument("--avd", default="openbot-private-smoke")
     parser.add_argument("--observe-seconds", type=int, default=30)
+    parser.add_argument("--expected-apk-sha256")
+    parser.add_argument("--expected-version-code", type=int)
     args = parser.parse_args()
     if os.environ.get("GITHUB_ACTIONS") != "true" or os.environ.get("RUNNER_ENVIRONMENT") != "github-hosted" or sys.platform != "linux":
         parser.error("This command requires a disposable GitHub-hosted Linux runner.")
     if args.observe_seconds < 30 or args.observe_seconds > 120:
         parser.error("The observation window must be from 30 to 120 seconds.")
+    if args.expected_apk_sha256 and not re.fullmatch(r"[a-fA-F0-9]{64}", args.expected_apk_sha256):
+        parser.error("The expected APK hash must be a SHA-256 hex digest.")
+    if args.expected_version_code is not None and not 1 <= args.expected_version_code <= 2_100_000_000:
+        parser.error("The expected versionCode must be from 1 to 2100000000.")
 
     candidate = args.candidate_dir.resolve()
     output = candidate / "emulator"
@@ -142,17 +148,38 @@ def main():
         def verify_apk():
             expected = (candidate / "SHA256SUMS").read_text().strip()
             digest = hashlib.sha256(apk.read_bytes()).hexdigest()
+            report["apkSha256"] = digest
             if expected != f"{digest}  openbot-private.apk":
                 raise RuntimeError("The downloaded APK differs from the build artifact hash.")
-            report["apkSha256"] = digest
+            if args.expected_apk_sha256 and digest != args.expected_apk_sha256.lower():
+                raise RuntimeError("The APK differs from the operator's expected SHA-256.")
             with zipfile.ZipFile(apk) as archive:
                 if archive.getinfo("assets/index.android.bundle").file_size == 0:
                     raise RuntimeError("The release APK has no embedded JavaScript.")
+                abis = sorted({
+                    name.split("/")[1] for name in archive.namelist()
+                    if name.startswith("lib/") and name.endswith(".so") and len(name.split("/")) >= 3
+                })
+                if abis != ["arm64-v8a", "x86_64"]:
+                    raise RuntimeError("The APK must contain exactly the arm64-v8a and x86_64 native ABIs.")
+                report["nativeAbis"] = abis
             tools = sorted((sdk / "build-tools").iterdir(), key=lambda path: tuple(map(int, re.findall(r"\d+", path.name))))[-1]
             signature = run([tools / "apksigner", "verify", "--verbose", "--print-certs", apk]).stdout.decode()
             (output / "signature.txt").write_text(signature)
             certificate = apk_signer_certificate_fingerprint(signature, os.environ.get("CERT_SHA256", ""))
             report["certificateSha256"] = certificate
+            badging = run([tools / "aapt", "dump", "badging", apk]).stdout.decode()
+            (output / "apk-badging.txt").write_text(badging)
+            identity = re.search(r"^package: name='([^']+)' versionCode='([0-9]+)'", badging, re.MULTILINE)
+            if identity is None or identity.group(1) != PACKAGE:
+                raise RuntimeError("The APK package does not match the isolated private application.")
+            version_code = int(identity.group(2))
+            if args.expected_version_code is not None and version_code != args.expected_version_code:
+                raise RuntimeError("The APK versionCode does not match the expected candidate.")
+            if re.search(r"^application-debuggable(?:\s|$)", badging, re.MULTILINE):
+                raise RuntimeError("The candidate must be a non-debuggable release APK.")
+            report["package"] = PACKAGE
+            report["versionCode"] = version_code
 
         record("same_signed_release_apk_hash_and_embedded_bundle", verify_apk)
         with socket.socket() as probe:

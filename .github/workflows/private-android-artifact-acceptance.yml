@@ -1,0 +1,230 @@
+name: Validate existing private Android APK
+
+on:
+  workflow_dispatch:
+    inputs:
+      build_run_id:
+        description: Run that produced the signed build artifact in this repository.
+        required: true
+        type: string
+      build_artifact_id:
+        description: Immutable private-android-build artifact ID, not the final or diagnostic artifact.
+        required: true
+        type: string
+      build_commit:
+        description: Full source commit of the APK build.
+        required: true
+        type: string
+      apk_sha256:
+        description: Expected APK SHA-256, not the artifact archive digest.
+        required: true
+        type: string
+      version_code:
+        description: Expected positive Android versionCode.
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: private-android-artifact-acceptance-${{ inputs.build_artifact_id }}
+  cancel-in-progress: false
+
+jobs:
+  emulator:
+    name: Accept immutable APK bytes on Android emulator
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    env:
+      CI: "1"
+      BUILD_RUN_ID: ${{ inputs.build_run_id }}
+      BUILD_ARTIFACT_ID: ${{ inputs.build_artifact_id }}
+      BUILD_COMMIT: ${{ inputs.build_commit }}
+      EXPECTED_APK_SHA256: ${{ inputs.apk_sha256 }}
+      EXPECTED_VERSION_CODE: ${{ inputs.version_code }}
+      CERT_SHA256: ${{ vars.PRIVATE_ANDROID_CERT_SHA256 }}
+    steps:
+      - name: Select disposable acceptance directories
+        shell: bash
+        run: |
+          echo "CANDIDATE_DIR=$RUNNER_TEMP/private-android-acceptance" >> "$GITHUB_ENV"
+          echo "ANDROID_AVD_HOME=$RUNNER_TEMP/private-android-acceptance-avd" >> "$GITHUB_ENV"
+
+      - name: Check out the validator source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Validate the same-repository build provenance
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          [[ "$BUILD_RUN_ID" =~ ^[1-9][0-9]*$ && "$BUILD_ARTIFACT_ID" =~ ^[1-9][0-9]*$ ]]
+          [[ "$BUILD_COMMIT" =~ ^[a-fA-F0-9]{40}$ && "$EXPECTED_APK_SHA256" =~ ^[a-fA-F0-9]{64}$ ]]
+          [[ "$EXPECTED_VERSION_CODE" =~ ^[1-9][0-9]{0,9}$ ]] && (( EXPECTED_VERSION_CODE <= 2100000000 ))
+          [[ "${CERT_SHA256//:/}" =~ ^[a-fA-F0-9]{64}$ ]]
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$BUILD_RUN_ID" > "$RUNNER_TEMP/android-source-run.json"
+          gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$BUILD_ARTIFACT_ID" > "$RUNNER_TEMP/android-source-artifact.json"
+          python3 - <<'PY'
+          import json, os, re
+          from pathlib import Path
+          root = Path(os.environ['RUNNER_TEMP'])
+          run = json.loads((root / 'android-source-run.json').read_text())
+          artifact = json.loads((root / 'android-source-artifact.json').read_text())
+          commit = os.environ['BUILD_COMMIT'].lower()
+          run_id, artifact_id = int(os.environ['BUILD_RUN_ID']), int(os.environ['BUILD_ARTIFACT_ID'])
+          repo_id = int(os.environ['GITHUB_REPOSITORY_ID'])
+          if run['id'] != run_id or run['head_sha'] != commit:
+              raise SystemExit('The build run does not match the expected source commit.')
+          if run['path'] != '.github/workflows/private-android-candidate.yml' or run['event'] != 'workflow_dispatch':
+              raise SystemExit('The source must be a private Android candidate build.')
+          source = artifact.get('workflow_run', {})
+          if artifact['id'] != artifact_id or artifact['expired'] or source.get('id') != run_id:
+              raise SystemExit('The immutable artifact does not belong to the expected build run.')
+          if source.get('repository_id') != repo_id or source.get('head_repository_id') != repo_id or source.get('head_sha') != commit:
+              raise SystemExit('The artifact must come from this repository and expected commit.')
+          match = re.fullmatch(rf'private-android-build-{run_id}-([1-9][0-9]*)', artifact['name'])
+          if match is None:
+              raise SystemExit('Only the signed build artifact can enter acceptance.')
+          attempt = int(match.group(1))
+          provenance = {
+              'schema': 1, 'buildRepository': os.environ['GITHUB_REPOSITORY'],
+              'buildRunId': run_id, 'buildRunAttempt': attempt, 'buildArtifactId': artifact_id,
+              'buildArtifactDigest': artifact.get('digest'), 'buildCommit': commit,
+              'validatorCommit': os.environ['GITHUB_SHA'], 'validatorRunId': os.environ['GITHUB_RUN_ID'],
+              'validatorRunAttempt': os.environ['GITHUB_RUN_ATTEMPT'],
+              'expectedApkSha256': os.environ['EXPECTED_APK_SHA256'].lower(),
+              'expectedVersionCode': int(os.environ['EXPECTED_VERSION_CODE']),
+              'expectedCertificateSha256': os.environ['CERT_SHA256'].replace(':', '').lower(),
+          }
+          (root / 'android-build-provenance.json').write_text(json.dumps(provenance, indent=2) + '\n')
+          (root / 'android-build-attempt').write_text(str(attempt) + '\n')
+          PY
+          read -r build_attempt < "$RUNNER_TEMP/android-build-attempt"
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$BUILD_RUN_ID/attempts/$build_attempt/jobs?per_page=100" > "$RUNNER_TEMP/android-source-jobs.json"
+          python3 - <<'PY'
+          import json, os
+          from pathlib import Path
+          root = Path(os.environ['RUNNER_TEMP'])
+          jobs = json.loads((root / 'android-source-jobs.json').read_text())['jobs']
+          matches = [job for job in jobs if job['name'] == 'Build signed APK candidate']
+          if len(matches) != 1 or matches[0]['conclusion'] != 'success' or matches[0]['head_sha'] != os.environ['BUILD_COMMIT'].lower():
+              raise SystemExit('The artifact must have a successful signed APK build job.')
+          provenance = json.loads((root / 'android-build-provenance.json').read_text())
+          provenance['buildJobId'] = matches[0]['id']
+          (root / 'android-build-provenance.json').write_text(json.dumps(provenance, indent=2) + '\n')
+          PY
+
+      - name: Download the immutable signed build artifact
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          artifact-ids: ${{ inputs.build_artifact_id }}
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          run-id: ${{ inputs.build_run_id }}
+          path: ${{ env.CANDIDATE_DIR }}
+
+      - name: Attach verified build and validator provenance
+        shell: bash
+        run: |
+          set -euo pipefail
+          cp "$RUNNER_TEMP/android-build-provenance.json" "$CANDIDATE_DIR/build-provenance.json"
+          grep -Fx "Commit: ${BUILD_COMMIT,,}" "$CANDIDATE_DIR/tool-versions.txt"
+          grep -Fx "versionCode: $EXPECTED_VERSION_CODE" "$CANDIDATE_DIR/tool-versions.txt"
+
+      - name: Set up Java for Android SDK tools
+        uses: actions/setup-java@de7274f081f381c8f8158605e0321c36c376e2e6 # v6.0.1
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Prepare a disposable API 36 emulator
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$RUNNER_ENVIRONMENT" == 'github-hosted' && "$RUNNER_OS" == 'Linux' ]]
+          test -c /dev/kvm
+          sudo chmod a+rw /dev/kvm
+          # The emulator binary links this library even with -no-audio.
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends libpulse0
+          export PATH="$ANDROID_HOME/cmdline-tools/latest/bin:$ANDROID_HOME/platform-tools:$ANDROID_HOME/emulator:$PATH"
+          printf '%s\n' "$ANDROID_HOME/cmdline-tools/latest/bin" "$ANDROID_HOME/platform-tools" "$ANDROID_HOME/emulator" >> "$GITHUB_PATH"
+          set +o pipefail
+          yes | sdkmanager --licenses > /dev/null
+          set -o pipefail
+          sdkmanager 'platform-tools' 'emulator' 'build-tools;37.0.0' 'system-images;android-36;google_apis;x86_64'
+          mkdir -p "$ANDROID_AVD_HOME" "$CANDIDATE_DIR/emulator"
+          printf 'no\n' | avdmanager create avd --name openbot-private-smoke \
+            --package 'system-images;android-36;google_apis;x86_64' \
+            --path "$ANDROID_AVD_HOME/openbot-private-smoke.avd" --device pixel_6
+          {
+            python3 --version
+            java -version 2>&1
+            "$ANDROID_HOME/platform-tools/adb" version
+            "$ANDROID_HOME/emulator/emulator" -version
+            "$ANDROID_HOME/emulator/emulator" -accel-check
+            sdkmanager --list_installed
+          } > "$CANDIDATE_DIR/emulator/tools.txt"
+
+      - name: Verify and smoke test the unchanged release APK
+        id: startup
+        shell: bash
+        run: |
+          python3 scripts/private-android-emulator-smoke.py --candidate-dir "$CANDIDATE_DIR" \
+            --expected-apk-sha256 "$EXPECTED_APK_SHA256" --expected-version-code "$EXPECTED_VERSION_CODE"
+
+      - name: Record exact-byte acceptance state
+        if: always()
+        shell: bash
+        env:
+          STARTUP_OUTCOME: ${{ steps.startup.outcome }}
+        run: |
+          python3 - <<'PY'
+          import hashlib, json, os
+          from pathlib import Path
+          candidate = Path(os.environ['CANDIDATE_DIR'])
+          apk = candidate / 'openbot-private.apk'
+          if not apk.exists():
+              raise SystemExit('No validated build APK was downloaded; no acceptance artifact can be produced.')
+          provenance = json.loads((Path(os.environ['RUNNER_TEMP']) / 'android-build-provenance.json').read_text())
+          report_path = candidate / 'emulator' / 'report.json'
+          report = json.loads(report_path.read_text()) if report_path.exists() else {}
+          digest = hashlib.sha256(apk.read_bytes()).hexdigest()
+          same = digest == provenance['expectedApkSha256']
+          passed = os.environ.get('STARTUP_OUTCOME') == 'success' and report.get('passed') is True and same and report.get('apkSha256AfterSmoke') == digest
+          state = {
+              'schema': 1, 'status': 'startup_smoke_passed' if passed else 'startup_smoke_not_accepted',
+              'commit': provenance['buildCommit'], 'validatorCommit': os.environ['GITHUB_SHA'],
+              'provenance': provenance, 'apkSha256': digest, 'unchangedBuildApk': same,
+              'packaging': 'passed' if report.get('certificateSha256') == provenance['expectedCertificateSha256'] and report.get('versionCode') == provenance['expectedVersionCode'] else 'not_confirmed',
+              'emulatorStartup': 'passed' if passed else os.environ.get('STARTUP_OUTCOME', 'not_run'),
+              'networkEvidence': report.get('network', {'instrumented': False}),
+              'realHostPairing': 'not_run', 'phoneAndClashMi': 'not_run',
+          }
+          (candidate / 'ACCEPTANCE.json').write_text(json.dumps(state, indent=2) + '\n')
+          (candidate / 'ACCEPTANCE.txt').write_text(
+              f"Status: {state['status']}\nAPK build commit: {state['commit']}\nValidator commit: {state['validatorCommit']}\n"
+              f"APK SHA-256: {digest}\nUnchanged expected APK: {same}\n"
+              'No APK was compiled or re-signed by this workflow. Startup evidence is scoped to emulator/report.json.\n'
+              'Network evidence covers only app-UID IP packet attempts in the observed window.\n'
+              'Real-host pairing, providers and physical-phone/Clash Mi acceptance remain pending.\n')
+          with Path(os.environ['GITHUB_STEP_SUMMARY']).open('a') as summary:
+              summary.write(f"## Existing Android APK acceptance\n\nStatus: {state['status']}\n\nAPK SHA-256: `{digest}`\n\n")
+              summary.write(f"Build run/artifact: {provenance['buildRunId']}/{provenance['buildArtifactId']}; build commit: {state['commit']}; validator commit: {state['validatorCommit']}.\n")
+          if not same:
+              raise SystemExit('The downloaded APK differs from the operator-approved SHA-256.')
+          PY
+
+      - name: Upload unchanged APK and scoped acceptance evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: private-android-acceptance-${{ inputs.build_artifact_id }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ env.CANDIDATE_DIR }}
+          if-no-files-found: ignore
+          retention-days: 14
