@@ -1,5 +1,47 @@
 import { isDynamicRecord } from "@openbot/contracts/runtime-values";
 
+/** Undefined is text; null is JSON that does not have the Codex diagnostic fields. */
+function readCodexDiagnostic(message: string) {
+  try {
+    const record = JSON.parse(message);
+    if (
+      !isDynamicRecord(record) ||
+      typeof record.level !== "string" ||
+      typeof record.target !== "string" ||
+      !isDynamicRecord(record.fields)
+    ) {
+      return null;
+    }
+    return {
+      level: record.level,
+      target: record.target,
+      message: typeof record.fields.message === "string" ? record.fields.message : null,
+      error: typeof record.fields.error === "string" ? record.fields.error : null,
+    };
+  } catch {
+    return undefined;
+  }
+}
+
+const POWERSHELL_SNAPSHOT_UNSUPPORTED =
+  "Failed to create shell snapshot for powershell: Shell snapshot not supported yet for PowerShell";
+
+/**
+ * Codex can run PowerShell commands without a shell snapshot. This known warning is about an
+ * optional optimization, not a failed turn. Match its subsystem, severity and exact message in
+ * both log formats. Other snapshot failures and records at error level stay visible.
+ */
+export function isCodexUnsupportedShellSnapshotDiagnostic(message: string): boolean {
+  const text = /^(?:\S+\s+)?WARN\s+codex_core::shell_snapshot:\s*(.*)$/u.exec(message);
+  if (text?.[1] === POWERSHELL_SNAPSHOT_UNSUPPORTED) return true;
+  const record = readCodexDiagnostic(message);
+  return (
+    record?.level === "WARN" &&
+    record.target === "codex_core::shell_snapshot" &&
+    record.message === POWERSHELL_SNAPSHOT_UNSUPPORTED
+  );
+}
+
 /**
  * Codex's text record of a completed fallback, as Codex 0.163 writes it when `LOG_FORMAT` is not
  * `json`: `<time>  WARN codex_otel::auth_storage: credential storage file fallback completed
@@ -174,8 +216,24 @@ function bracketBalance(line: string) {
  * Other MCP step failures, such as a server that does not connect, and other cascade steps stay visible.
  */
 export function isToolCallDiagnostic(message: string): boolean {
+  // LOG_FORMAT=json moves the tool error into fields.error. Keep the same distinction as the
+  // text form below: a failed or cancelled tool call is not a provider failure; a fatal one is.
+  const record = readCodexDiagnostic(message);
+  if (record !== undefined) {
+    return (
+      record !== null &&
+      record.level === "ERROR" &&
+      record.target === "codex_core::tools::router" &&
+      typeof record.error === "string" &&
+      record.error.trim().length > 0 &&
+      !record.error.trimStart().startsWith("Fatal error:")
+    );
+  }
+  // A fatal Codex record can quote another provider's tool_error marker. Once the source is
+  // known, do not let the generic tool patterns reclassify that record.
+  const codex = /^(?:\S+\s+)?(?:ERROR\s+)?codex_core::tools::router:\s*error=([^\r\n]*)$/u.exec(message);
+  if (codex) return Boolean(codex[1]?.trim() && !codex[1].trimStart().startsWith("Fatal error:"));
   return (
-    /^[^\r\n]*\bcodex_core:[^\r\n]*\brouter:\s*error=(?!Fatal error:)/.test(message) ||
     /\btool_error:\s*(?:tool_output_error|execution_failure|parse_failure)\b/.test(message) ||
     /\berror executing cascade step:\s*CORTEX_STEP_TYPE_MCP_TOOL:\s*(?:calling "tools\/call":\s*)?Error:/.test(
       message,

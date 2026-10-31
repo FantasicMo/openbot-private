@@ -62,6 +62,9 @@ jobs:
       - name: Check mobile private transport and recovery
         run: bun scripts/private-mobile-transport-e2e.ts
 
+      - name: Check Codex diagnostic classification and redaction
+        run: bun scripts/codex-diagnostics-e2e.ts
+
       - name: Check IPC, preload and renderer security boundaries
         run: >-
           bun run test:desktop --
@@ -87,6 +90,7 @@ jobs:
             .openbot-build/private-access-gateway-e2e/report.json
             .openbot-build/private-access-host-e2e/report.json
             .openbot-build/private-mobile-transport-e2e/report.json
+            .openbot-build/codex-diagnostics-e2e/report.json
           include-hidden-files: true
           if-no-files-found: warn
           retention-days: 30

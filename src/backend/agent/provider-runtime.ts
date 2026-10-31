@@ -91,6 +91,7 @@ import {
   isBackgroundRefreshDiagnostic,
   isBundledSandboxFallbackDiagnostic,
   isCodexCredentialFallbackDiagnostic,
+  isCodexUnsupportedShellSnapshotDiagnostic,
   isGlogBelowErrorDiagnostic,
   isIgnoredConfigDiagnostic,
   isMcpSubsystemDiagnostic,
@@ -3559,6 +3560,10 @@ export class ProviderRuntime implements ProviderPort {
         logger.info("Codex completed a credential storage fallback.", { provider: client.provider, message });
         return;
       }
+      if (client.provider === "codex" && isCodexUnsupportedShellSnapshotDiagnostic(raw)) {
+        logger.info("Codex runs PowerShell without a shell snapshot.", { provider: client.provider, message });
+        return;
+      }
       // An agent that tears down its sessions while OpenBot stops it (idle release, restart, quit)
       // can write an error for each one. It is not a failure the user can act on, so it goes to the log.
       if (origin?.duringStop) {
@@ -3586,7 +3591,9 @@ export class ProviderRuntime implements ProviderPort {
         stderrLogger.warn("A provider reported a telemetry export failure.", { provider: client.provider, message });
         return;
       }
-      if (isToolCallDiagnostic(message)) {
+      // Classify the complete record: shortening a JSON tool diagnostic makes it invalid JSON.
+      // Only the redacted, bounded message is logged below.
+      if (isToolCallDiagnostic(raw)) {
         stderrLogger.warn("A provider reported a failed tool call.", { provider: client.provider, message });
         return;
       }
