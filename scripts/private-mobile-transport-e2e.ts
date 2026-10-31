@@ -17,7 +17,7 @@ import { PRIVATE_PAIRING_PATH } from "@openbot/private-access/contracts";
 import { MOBILE_ATTACHMENT_BYTES } from "@openbot/team-client/remote-peer";
 import { Effect } from "effect";
 import { type WebSocket, WebSocketServer } from "ws";
-import { PrivateMobileError } from "../apps/mobile/src/features/private-access/private-contracts";
+import { MAX_PRIVATE_HOSTS, PrivateMobileError } from "../apps/mobile/src/features/private-access/private-contracts";
 import { PrivateHostStore } from "../apps/mobile/src/features/private-access/private-host-store";
 import { PrivateHttpTransport } from "../apps/mobile/src/features/private-access/private-http-transport";
 import type { PrivateNetworkPort } from "../apps/mobile/src/features/private-access/private-ports";
@@ -336,6 +336,23 @@ async function main() {
     { connection: (update) => updates.push(update.state), event: (_id, event) => events.push(event.type) },
     "1.4.4",
   );
+  let capacityPersisted: string | null = null;
+  let capacityWrites = 0;
+  let recoveryFixtureMemberId: string | null = null;
+  const capacityStorage = {
+    read: async () => capacityPersisted,
+    write: async (value: string) => {
+      capacityWrites += 1;
+      capacityPersisted = value;
+    },
+  };
+  const capacityHosts = new PrivateHostStore(
+    capacityStorage,
+    network,
+    () => undefined,
+    () => mobileNow,
+    "1.4.4",
+  );
   try {
     await Effect.runPromise(service.initialize());
     const status = await Effect.runPromise(service.configure({ publicOrigin: origin, gatewayPort }));
@@ -395,6 +412,7 @@ async function main() {
       );
       const recovered = await hosts.pair(JSON.stringify(offer));
       secretValues.push(recovered.username, recovered.password, recovered.sessionToken);
+      recoveryFixtureMemberId = recovered.member.id;
       assert.ok(store.authenticateSession(recovered.sessionToken));
       assert.equal(store.listMembers().length, committedMembers);
       assert.equal(networkPaths.filter((path) => path === PRIVATE_PAIRING_PATH).length, posted);
@@ -439,6 +457,80 @@ async function main() {
       assert.equal(store.listMembers().length, committedMembers);
       assert.equal(networkPaths.filter((path) => path === PRIVATE_PAIRING_PATH).length, posted);
       mobileNow = Date.now();
+    });
+    await step("full_private_profile_rejects_new_host_without_network_or_write", async () => {
+      const base = hosts.host(identity.serverId);
+      capacityPersisted = JSON.stringify({
+        deviceId: hosts.state().deviceId,
+        hosts: Array.from({ length: MAX_PRIVATE_HOSTS }, (_, index) => ({
+          ...base,
+          hostId: index === 0 ? base.hostId : `capacity-fixture-host-${index}`,
+        })),
+      });
+      const saved = capacityPersisted;
+      await capacityHosts.restore();
+      assert.equal(capacityHosts.state().hosts.length, MAX_PRIVATE_HOSTS);
+      const offer = await Effect.runPromise(service.createPairing({ role: "member", label: "Capacity fixture" }));
+      secretValues.push(offer.secret);
+      const beforeNetwork = networkPaths.length;
+      const beforeMembers = store.listMembers().length;
+      await assert.rejects(
+        capacityHosts.pair(JSON.stringify({ ...offer, hostId: "capacity-overflow-host" })),
+        (error) => error instanceof PrivateMobileError && error.code === "pair",
+      );
+      assert.equal(networkPaths.length, beforeNetwork);
+      assert.equal(capacityWrites, 0);
+      assert.equal(capacityPersisted, saved);
+      assert.equal(store.listMembers().length, beforeMembers);
+      const reloaded = new PrivateHostStore(
+        capacityStorage,
+        network,
+        () => undefined,
+        () => mobileNow,
+        "1.4.4",
+      );
+      await reloaded.restore();
+      assert.equal(reloaded.state().hosts.length, MAX_PRIVATE_HOSTS);
+    });
+    await step("full_private_profile_repairs_existing_host_and_reloads_all_32", async () => {
+      const beforeMember = capacityHosts.host(identity.serverId).member.id;
+      // This exact member was created by the earlier recovery fixture in this new TeamStore.
+      // Free its seat while retaining the released three-member limit and the current member.
+      assert.ok(recoveryFixtureMemberId && recoveryFixtureMemberId !== beforeMember);
+      await Effect.runPromise(service.revokeDevice(recoveryFixtureMemberId));
+      const offer = await Effect.runPromise(service.createPairing({ role: "member", label: "Capacity repair" }));
+      secretValues.push(offer.secret);
+      const repaired = await capacityHosts.pair(JSON.stringify(offer));
+      secretValues.push(repaired.username, repaired.password, repaired.sessionToken);
+      assert.notEqual(repaired.member.id, beforeMember);
+      assert.ok(store.authenticateSession(repaired.sessionToken));
+      assert.equal(capacityHosts.state().hosts.length, MAX_PRIVATE_HOSTS);
+      assert.equal(capacityHosts.state().hosts.filter((host) => host.hostId === identity.serverId).length, 1);
+      const reloaded = new PrivateHostStore(
+        capacityStorage,
+        network,
+        () => undefined,
+        () => mobileNow,
+        "1.4.4",
+      );
+      await reloaded.restore();
+      assert.equal(reloaded.state().hosts.length, MAX_PRIVATE_HOSTS);
+      assert.equal(reloaded.host(identity.serverId).member.id, repaired.member.id);
+      await Effect.runPromise(service.revokeDevice(repaired.member.id));
+    });
+    await step("invalid_private_state_change_never_reaches_storage", async () => {
+      const saved = capacityPersisted;
+      const beforeWrites = capacityWrites;
+      const beforeNetwork = networkPaths.length;
+      const previous = capacityHosts.host(identity.serverId);
+      await assert.rejects(
+        capacityHosts.replace({ ...previous, hostName: "" }),
+        (error) => error instanceof PrivateMobileError && error.code === "storage",
+      );
+      assert.equal(capacityPersisted, saved);
+      assert.equal(capacityWrites, beforeWrites);
+      assert.equal(networkPaths.length, beforeNetwork);
+      assert.equal(capacityHosts.host(identity.serverId).hostName, previous.hostName);
     });
     await step("connect_auth_protocol_capabilities_and_runtime_snapshot", async () => {
       await transport.connect(identity.serverId, identity.publicKey);

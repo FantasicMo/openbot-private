@@ -4,6 +4,7 @@ import {
   decodePrivateAuthentication,
   decodePrivateOffer,
   decodePrivateState,
+  MAX_PRIVATE_HOSTS,
   PrivateMobileError,
   type PrivateMobileState,
   type PrivatePairedHost,
@@ -40,7 +41,7 @@ export class PrivateHostStore implements PrivateHostPort {
     const text = await this.#storage.read();
     if (text !== null) this.#state = decodePrivateState(JSON.parse(text));
     else {
-      const state = { deviceId: bytesToBase64Url(this.#network.randomBytes(24)), hosts: [] };
+      const state = decodePrivateState({ deviceId: bytesToBase64Url(this.#network.randomBytes(24)), hosts: [] });
       await this.#storage.write(JSON.stringify(state));
       this.#state = state;
     }
@@ -60,8 +61,9 @@ export class PrivateHostStore implements PrivateHostPort {
 
   async #save(change: (state: PrivateMobileState) => PrivateMobileState): Promise<void> {
     const next = this.#tail.then(async () => {
-      const state = change(this.state());
+      let state: PrivateMobileState;
       try {
+        state = decodePrivateState(change(this.state()));
         await this.#storage.write(JSON.stringify(state));
       } catch {
         throw new PrivateMobileError("storage");
@@ -96,6 +98,7 @@ export class PrivateHostStore implements PrivateHostPort {
       if (expired && !recovering) throw new PrivateMobileError("expiredOffer");
       const existing = this.state().hosts.find((host) => host.hostId === offer.hostId);
       if (existing && existing.hostPublicKey !== offer.hostPublicKey) throw new PrivateMobileError("identity");
+      if (!existing && this.state().hosts.length >= MAX_PRIVATE_HOSTS) throw new PrivateMobileError("pair");
       await verifyPrivateHost(this.#network, offer, this.#appVersion);
       const pending =
         saved && recovering

@@ -5,7 +5,7 @@ import { type ChildProcess, execFileSync, spawn } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
 import { once } from "node:events";
 import { existsSync } from "node:fs";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { mkdir, readFile, stat, writeFile } from "node:fs/promises";
 import { createServer } from "node:net";
 import { homedir } from "node:os";
 import { basename, isAbsolute, join, relative, resolve } from "node:path";
@@ -19,12 +19,14 @@ import {
   TEAM_PROTOCOL_VERSION_HEADER,
 } from "@openbot/contracts/team-protocol/v1";
 import { encodeTeamProtocolV1CurrentClientEvent } from "@openbot/contracts/team-protocol/v1-adapter";
-import { createOpenBotLogger, registerSecretValue } from "@openbot/logging";
+import { createOpenBotLogger, redactText, registerSecretValue } from "@openbot/logging";
 import { PRIVATE_PAIRING_PATH, PrivateHostPairingOfferSchema } from "@openbot/private-access/contracts";
 import { Schema } from "effect";
+import { chromium } from "playwright-core";
 import { WebSocket } from "ws";
 import { parse as parseYaml } from "yaml";
-import { type AutomationSession, connectToDevApp } from "./dev-automation/cdp-client";
+import { forwardDiagnosticLines } from "../src/main/remote-diagnostics";
+import { type AutomationSession, connectToDevApp, verifyBrowserOwnership } from "./dev-automation/cdp-client";
 
 if (process.platform !== "win32" || process.env.GITHUB_ACTIONS !== "true")
   throw new Error("This installer E2E runs only on a disposable Windows GitHub Actions runner.");
@@ -80,6 +82,7 @@ type WaitPhase =
   | "cdp_http_ready"
   | "cdp_renderer_connect"
   | "private_host_ready"
+  | "startup_diagnostics"
   | "event_runtime_snapshot"
   | "revoked_socket_closed";
 interface SafeFailure {
@@ -103,12 +106,34 @@ class SmokeFailure extends Error {
     this.name = "SmokeFailure";
   }
 }
+interface LaunchEvidence {
+  attempt: number;
+  profile: "default" | "explicit";
+  startedAt: string;
+  pid: number | null;
+  phase: WaitPhase;
+  cdpHttpReady: boolean;
+  rendererAttached: boolean;
+  ownerAlive: boolean;
+  exitCode: number | null;
+  signal: NodeJS.Signals | null;
+  lastAttachError?: SafeFailure & { message?: string };
+  cdpOwnerVerified?: boolean;
+  targets?: { type: string; category: string }[];
+  totalTargets?: number;
+  nativeWindow?: "startup_error" | "other" | "none";
+  freshMainErrorCount?: number;
+  freshMainErrors?: string[];
+  processMainErrors: string[];
+  diagnosticFailures: SafeFailure[];
+}
 const report: {
   passed: boolean;
   scope: string;
   steps: { name: string; passed: boolean; durationMs: number; failure?: SafeFailure }[];
   failure?: { step: string } & SafeFailure;
   cleanupFailures: ({ operation: "login_item" | "owned_app" } & SafeFailure)[];
+  launches: LaunchEvidence[];
   officialDataChecks: {
     scope: "CI_sentinel_files_only";
     sentinels: { area: string; sha256: string; rootExistedBefore: boolean }[];
@@ -121,6 +146,7 @@ const report: {
   scope: "installed_private_Windows_Electron_real_HostService_TeamApiServer_TeamStore_and_gateway",
   steps: [],
   cleanupFailures: [],
+  launches: [],
   officialDataChecks: { scope: "CI_sentinel_files_only", sentinels: [], verifiedAfter: [] },
   loginItemChecks: { scope: "CI_private_AUMID_only", preservedProfileWithSpaces: false, removed: false },
   unverified: [
@@ -377,6 +403,96 @@ async function until(phase: WaitPhase, ready: () => boolean | Promise<boolean>):
   });
 }
 
+/** Redact complete values before bounding them. No raw log, page title or URL is exported. */
+function diagnosticText(value: string): string {
+  return redactText(value)
+    .replace(/\b[a-z][a-z0-9+.-]*:\/\/[^\s"'<>]+/giu, "[url-redacted]")
+    .slice(0, 12_000);
+}
+
+function targetCategory(
+  value: string,
+): "about_blank" | "private_app" | "app_helper" | "error_page" | "devtools" | "unparseable" | "other" {
+  if (value === "about:blank") return "about_blank";
+  try {
+    const url = new URL(value);
+    if (url.protocol === "openbot-app:" && url.hostname === "app" && url.pathname === "/index.html")
+      return "private_app";
+    if (url.protocol === "openbot-app:" && url.pathname === "/helper.html") return "app_helper";
+    if (url.protocol === "chrome-error:") return "error_page";
+    if (url.protocol === "devtools:") return "devtools";
+  } catch {
+    return "unparseable";
+  }
+  return "other";
+}
+
+async function collectLaunchFailure(launch: LaunchEvidence, port: number, directory: string): Promise<void> {
+  const owned = child;
+  launch.ownerAlive = Boolean(owned?.pid !== undefined && owned.exitCode === null && owned.signalCode === null);
+  launch.exitCode = owned?.exitCode ?? null;
+  launch.signal = owned?.signalCode ?? null;
+  await within("startup_diagnostics", 15_000, async () => {
+    const browser = await chromium.connectOverCDP(`http://127.0.0.1:${port}`, { timeout: 5_000 });
+    try {
+      launch.cdpOwnerVerified = launch.pid !== null && (await verifyBrowserOwnership(browser, launch.pid));
+      if (!launch.cdpOwnerVerified) return;
+      const probe = await browser.newBrowserCDPSession();
+      try {
+        const { targetInfos } = await probe.send("Target.getTargets");
+        launch.totalTargets = targetInfos.length;
+        launch.targets = targetInfos.slice(0, 20).map((target) => ({
+          type: ["page", "service_worker", "background_page", "browser"].includes(target.type) ? target.type : "other",
+          category: targetCategory(target.url),
+        }));
+      } finally {
+        await probe.detach().catch(() => undefined);
+      }
+    } finally {
+      await browser.close().catch(() => undefined);
+    }
+  }).catch((error: unknown) => launch.diagnosticFailures.push(safeFailure(error)));
+  if (launch.pid !== null) {
+    try {
+      const environment = { ...process.env };
+      delete environment.PSModulePath;
+      const text = execFileSync(
+        "powershell.exe",
+        [
+          "-NoProfile",
+          "-NonInteractive",
+          "-Command",
+          `$ErrorActionPreference = 'Stop'; $ownedProcess = Get-Process -Id ${launch.pid}; @{ present = ($ownedProcess.MainWindowHandle.ToInt64() -ne 0); title = $ownedProcess.MainWindowTitle } | ConvertTo-Json -Compress`,
+        ],
+        { encoding: "utf8", env: environment, timeout: 10_000, stdio: ["ignore", "pipe", "ignore"] },
+      );
+      const window = Schema.decodeUnknownSync(Schema.Struct({ present: Schema.Boolean, title: Schema.String }))(
+        JSON.parse(text),
+      );
+      launch.nativeWindow = !window.present
+        ? "none"
+        : ["OpenBot couldn’t start", "OpenBot 无法启动"].includes(window.title)
+          ? "startup_error"
+          : "other";
+    } catch (error) {
+      launch.diagnosticFailures.push(safeFailure(error));
+    }
+  }
+  try {
+    const path = join(directory, "logs", "main", "main.log");
+    const info = await stat(path);
+    assert.ok(info.size <= 2 * 1024 * 1024, "Only the bounded main log may be read.");
+    const errors = (await readFile(path, "utf8")).split(/\r?\n/u).filter((line) => {
+      const timestamp = line.slice(0, 24);
+      return timestamp >= launch.startedAt && /^\d{4}-\d{2}-\d{2}T[^ ]+ ERROR \[main\] /u.test(line);
+    });
+    launch.freshMainErrorCount = errors.length;
+    launch.freshMainErrors = errors.slice(-8).map(diagnosticText);
+  } catch (error) {
+    launch.diagnosticFailures.push(safeFailure(error));
+  }
+}
+
 async function startApp(userDataDirectory?: string, fromLoginItem = false): Promise<void> {
   const port = await unusedPort();
   launchFailed = false;
@@ -389,6 +505,21 @@ async function startApp(userDataDirectory?: string, fromLoginItem = false): Prom
     args.unshift(registration.command.slice(loginCommandPrefix.length));
   } else if (userDataDirectory) args.unshift(`--user-data-dir=${userDataDirectory}`);
   activeProfileDirectory = userDataDirectory ?? profileDirectory;
+  const launch: LaunchEvidence = {
+    attempt: report.launches.length + 1,
+    profile: userDataDirectory ? "explicit" : "default",
+    startedAt: new Date().toISOString(),
+    pid: null,
+    phase: "cdp_http_ready",
+    cdpHttpReady: false,
+    rendererAttached: false,
+    ownerAlive: true,
+    exitCode: null,
+    signal: null,
+    processMainErrors: [],
+    diagnosticFailures: [],
+  };
+  report.launches.push(launch);
   // Initial install/reinstall checks keep the default private data path.
   child = spawn(executable, args, {
     env: {
@@ -401,48 +532,80 @@ async function startApp(userDataDirectory?: string, fromLoginItem = false): Prom
     },
     windowsVerbatimArguments: fromLoginItem,
     windowsHide: true,
-    stdio: "ignore",
+    stdio: ["ignore", "pipe", "pipe"],
   });
+  const captureMainErrors = (text: string) => {
+    for (const line of text.split(/\r?\n/u)) {
+      if (!/^\d{4}-\d{2}-\d{2}T[^ ]+ ERROR \[main\] /u.test(line)) continue;
+      launch.processMainErrors.push(diagnosticText(line));
+      if (launch.processMainErrors.length > 8) launch.processMainErrors.shift();
+    }
+  };
+  // The startup error box blocks Electron's event loop. Its asynchronous disk log may not flush;
+  // keep only bounded, redacted main-error lines from this exact spawned process's streams too.
+  forwardDiagnosticLines(child.stdout, captureMainErrors);
+  forwardDiagnosticLines(child.stderr, captureMainErrors);
   child.once("error", () => {
     launchFailed = true;
   });
-  await until("cdp_http_ready", async () => {
-    try {
-      const response = await fetch(`http://127.0.0.1:${port}/json/version`, { signal: AbortSignal.timeout(2_000) });
-      return response.ok;
-    } catch {
-      return false;
-    }
-  });
-  await until("cdp_renderer_connect", async () => {
-    try {
-      session = await connectToDevApp(port, logger, {
-        ownerPid: child?.pid,
-        pageSelector: "openbot-app://app/index.html",
-      });
-      return true;
-    } catch {
-      return false;
-    }
-  });
-  await until("private_host_ready", async () => {
-    try {
-      const status = await ipc("window.openbot.privateAccess.status()", statusSchema);
-      if (status.phase === "error")
-        throw new SmokeFailure({
-          code:
-            status.errorCode === "invalid_configuration"
-              ? "private_invalid_configuration"
-              : "private_gateway_start_failed",
-          phase: "private_host_ready",
-          hostPhase: "error",
+  launch.pid = child.pid ?? null;
+  let acceptingConnections = true;
+  try {
+    await until("cdp_http_ready", async () => {
+      try {
+        const response = await fetch(`http://127.0.0.1:${port}/json/version`, { signal: AbortSignal.timeout(2_000) });
+        return response.ok;
+      } catch {
+        return false;
+      }
+    });
+    launch.cdpHttpReady = true;
+    launch.phase = "cdp_renderer_connect";
+    await until("cdp_renderer_connect", async () => {
+      try {
+        const attached = await connectToDevApp(port, logger, {
+          ownerPid: child?.pid,
+          pageSelector: "openbot-app://app/index.html",
         });
-      return status.enabled && status.hostId !== null;
-    } catch (error) {
-      if (error instanceof SmokeFailure) throw error;
-      return false;
-    }
-  });
+        if (!acceptingConnections) {
+          await attached.close().catch(() => undefined);
+          return false;
+        }
+        session = attached;
+        return true;
+      } catch (error) {
+        launch.lastAttachError = {
+          ...safeFailure(error),
+          ...(error instanceof Error ? { message: diagnosticText(error.message) } : {}),
+        };
+        return false;
+      }
+    });
+    launch.rendererAttached = true;
+    launch.phase = "private_host_ready";
+    await until("private_host_ready", async () => {
+      try {
+        const status = await ipc("window.openbot.privateAccess.status()", statusSchema);
+        if (status.phase === "error")
+          throw new SmokeFailure({
+            code:
+              status.errorCode === "invalid_configuration"
+                ? "private_invalid_configuration"
+                : "private_gateway_start_failed",
+            phase: "private_host_ready",
+            hostPhase: "error",
+          });
+        return status.enabled && status.hostId !== null;
+      } catch (error) {
+        if (error instanceof SmokeFailure) throw error;
+        return false;
+      }
+    });
+  } catch (error) {
+    acceptingConnections = false;
+    await collectLaunchFailure(launch, port, activeProfileDirectory);
+    throw error;
+  }
 }
 
 async function stopApp(): Promise<void> {
@@ -799,6 +962,6 @@ try {
   });
   // No broad delete, registry removal, or cleanup of a pre-existing installation/profile.
   await mkdir(output, { recursive: true });
-  await writeFile(reportPath, `${JSON.stringify(report, null, 2)}\n`);
+  await writeFile(reportPath, `${redactText(JSON.stringify(report, null, 2))}\n`);
   process.stdout.write(`${JSON.stringify({ passed: report.passed, report: reportPath })}\n`);
 }

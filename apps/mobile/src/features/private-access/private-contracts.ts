@@ -8,6 +8,8 @@ import {
 import { remoteHostFingerprint } from "@openbot/team-client/host-key-handover";
 import { Schema } from "effect";
 
+export const MAX_PRIVATE_HOSTS = 32;
+
 export class PrivateMobileError extends Error {
   constructor(
     readonly code:
@@ -141,7 +143,7 @@ export function decodePrivateAuthentication(value: unknown): PrivateAuthenticate
 }
 
 export function decodePrivateState(value: unknown): PrivateMobileState {
-  if (!isDynamicRecord(value) || !Array.isArray(value.hosts) || value.hosts.length > 32)
+  if (!isDynamicRecord(value) || !Array.isArray(value.hosts) || value.hosts.length > MAX_PRIVATE_HOSTS)
     throw new PrivateMobileError("storage");
   const pending = value.pending;
   if (pending !== undefined && !isDynamicRecord(pending)) throw new PrivateMobileError("storage");

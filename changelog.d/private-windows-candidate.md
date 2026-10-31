@@ -9,3 +9,6 @@ Team API, pairing gateway, WebSockets and revocation, then checks reinstall pers
 preservation on uninstall. Harmless official profile/workspace sentinels are created without
 overwriting existing files and checked by content and SHA-256 after each installer phase.
 Tailscale TLS, providers, Android and streaming remain separate checks.
+
+- Record bounded, redacted startup errors and verified process/renderer state when the cloud
+installer smoke cannot restart the app. A diagnostic report does not mark a failed candidate as accepted.
