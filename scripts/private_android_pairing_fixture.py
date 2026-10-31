@@ -16,7 +16,7 @@ import sys
 import tempfile
 import threading
 import time
-from urllib.parse import parse_qs, quote, urlparse
+from urllib.parse import parse_qs, urlparse
 import uuid
 import xml.etree.ElementTree as ET
 
@@ -35,9 +35,25 @@ def native_pairing_fixture(device, shell, package, activity, uid, chain, tables,
     thread = None
     state = None
     state_lock = threading.Lock()
+    device_input = "/data/local/tmp/openbot-private-fixture-input.txt"
+    device_helper = "/data/local/tmp/openbot-private-fixture-input.jar"
     try:
         with tempfile.TemporaryDirectory(prefix="openbot-native-pairing-") as scratch:
             root = Path(scratch)
+            stage = "compile-atomic-input-helper"
+            classes = root / "input-classes"
+            dex = root / "input-dex"
+            classes.mkdir()
+            dex.mkdir()
+            source = Path(__file__).with_name("PrivateAndroidFixtureInput.java")
+            subprocess.run(["javac", "--release", "8", "-d", str(classes), str(source)], capture_output=True, check=True, timeout=30)
+            d8 = Path(os.environ["ANDROID_HOME"]) / "build-tools" / "37.0.0" / "d8"
+            subprocess.run([str(d8), "--min-api", "24", "--output", str(dex), str(classes / "PrivateAndroidFixtureInput.class")], capture_output=True, check=True, timeout=30)
+            helper_jar = root / "fixture-input.jar"
+            subprocess.run(["jar", "--create", "--file", str(helper_jar), "-C", str(dex), "classes.dex"], capture_output=True, check=True, timeout=20)
+            device("push", str(helper_jar), device_helper)
+            shell("chmod", "400", device_helper)
+            stage = "create-fixture"
 
             def openssl(*args):
                 return subprocess.run(["openssl", *map(str, args)], capture_output=True, check=True, timeout=20).stdout
@@ -194,8 +210,12 @@ def native_pairing_fixture(device, shell, package, activity, uid, chain, tables,
             # Android's documented alias for the runner loopback, not a public endpoint:
             # https://developer.android.com/studio/run/emulator-networking
             offer = {"protocol": 1, "offerId": offer_id, "secret": secret, "expiresAt": (datetime.now(timezone.utc) + timedelta(minutes=10)).isoformat(), "publicOrigin": f"https://10.0.2.2:{port}", "hostId": host_id, "hostName": "Native fixture", "fingerprint": fingerprint, "publicKey": public_key}
-            link = "openbot-private://pair?offer=" + quote(json.dumps(offer, separators=(",", ":")), safe="")
-            sensitive.extend([link, json.dumps(offer, separators=(",", ":"))])
+            input_text = json.dumps(offer, separators=(",", ":"))
+            sensitive.append(input_text)
+            input_file = root / "fixture-input.txt"
+            input_file.write_text(input_text, encoding="utf-8")
+            device("push", str(input_file), device_input)
+            shell("chmod", "600", device_input)
 
             def tree():
                 shell("uiautomator", "dump", "--compressed", "/sdcard/openbot-private-fixture.xml")
@@ -204,13 +224,23 @@ def native_pairing_fixture(device, shell, package, activity, uid, chain, tables,
                 # Keep only fixed flags. Never save a populated field, arbitrary text or screenshot.
                 evidence["lastUi"] = {
                     "pairingInputPresent": any(node.get("class", "").endswith("EditText") for node in current.iter("node")),
-                    "fixtureOfferPresent": any(node.get("class", "").endswith("EditText") and node.get("text", "") == link for node in current.iter("node")),
+                    "fixtureOfferPresent": any(node.get("class", "").endswith("EditText") and node.get("text", "") == input_text for node in current.iter("node")),
                     "pairButtonPresent": "Pair host" in values,
                     "identityRejected": "The host identity could not be verified." in values,
                     "offerRejected": "This private pairing offer is invalid." in values,
                     "pairingFailed": "The host could not be paired. Check the offer and connection." in values,
                     "networkFailed": "The private host could not be reached." in values,
                 }
+                fields = [node for node in current.iter("node") if node.get("class", "").endswith("EditText")]
+                if fields:
+                    observed = fields[0].get("text", "")
+                    evidence["input"] = {
+                        "expectedCharacters": len(input_text),
+                        "observedCharacters": len(observed),
+                        "focused": fields[0].get("focused") == "true",
+                        "isExpectedPrefix": bool(observed) and input_text.startswith(observed),
+                        "prefixCategory": "empty" if not observed else "json" if observed.startswith("{") else "startup-sentinel" if observed == "private-smoke-invalid-offer" else "other",
+                    }
                 return current
 
             def text_values(value):
@@ -231,25 +261,23 @@ def native_pairing_fixture(device, shell, package, activity, uid, chain, tables,
                 shell("am", "force-stop", package)
                 shell("am", "start", "-W", "-n", activity, timeout=90)
                 current = wait_for(lambda value: any(node.get("class", "").endswith("EditText") for node in value.iter("node")))
-                field = next(node for node in current.iter("node") if node.get("class", "").endswith("EditText"))
-
                 def bounds(node):
                     match = re.fullmatch(r"\[(\d+),(\d+)\]\[(\d+),(\d+)\]", node.get("bounds", ""))
                     if match is None:
                         raise RuntimeError("The fixture UI target has no bounds.")
                     return tuple(map(int, match.groups()))
 
-                left, top, right, bottom = bounds(field)
-                shell("input", "tap", str((left + right) // 2), str((top + bottom) // 2))
-                stage = f"{phase}-fill-input"
-                # Use the same text-input path as startup smoke. Pairing acceptance does not need
-                # a cold deep-link route to consume and prefill this long fixture offer.
-                # Android input replaces only the special %s escape; JSON URL encoding has none.
-                if "%s" in link:
-                    raise RuntimeError("The fixture input contains an unsupported text escape.")
-                shell("input", "text", shlex.quote(link), timeout=120)
-                shell("input", "keyevent", "111")
-                current = wait_for(lambda value: any(node.get("class", "").endswith("EditText") and node.get("text", "") == link for node in value.iter("node")))
+                stage = f"{phase}-atomic-input"
+                # ACTION_SET_TEXT replaces the focused field atomically after an explicit clear.
+                # No payload goes in a command argument. There is no key-stream/clipboard fallback.
+                result = device("shell", "env", f"CLASSPATH={device_helper}", "app_process", "/system/bin", "PrivateAndroidFixtureInput", timeout=45, check=False)
+                reports = [json.loads(line) for line in result.stdout.decode("utf-8", "replace").splitlines() if line.startswith('{"status":')]
+                if reports:
+                    item = reports[-1]
+                    evidence["atomicInput"] = {key: item.get(key) for key in ("status", "stage", "expectedCharacters", "observedCharacters", "focused", "cleared", "exactMatch", "hashMatch")}
+                if result.returncode != 0 or not reports or reports[-1].get("status") != "set" or reports[-1].get("exactMatch") is not True or reports[-1].get("hashMatch") is not True or reports[-1].get("cleared") is not True or reports[-1].get("focused") is not True or reports[-1].get("expectedCharacters") != len(input_text) or reports[-1].get("observedCharacters") != len(input_text):
+                    raise RuntimeError("Atomic fixture input was not confirmed.")
+                current = tree()
                 stage = f"{phase}-find-submit"
                 size = re.findall(r"(\d+)x(\d+)", shell("wm", "size"))
                 if not size:
@@ -312,6 +340,11 @@ def native_pairing_fixture(device, shell, package, activity, uid, chain, tables,
             server.server_close()
         if thread is not None:
             thread.join(timeout=5)
+        try:
+            cleanup = device("shell", "rm", "-f", device_input, device_helper, check=False, timeout=10)
+            evidence["deviceInputCleanup"] = cleanup.returncode == 0
+        except Exception:
+            evidence["deviceInputCleanup"] = False
         if state is not None:
             with state_lock:
                 evidence["requests"] = {"identity": state["identity"], "redemptions": state["pair"], "authenticated": state["authenticated"], "reopenedAuthenticated": state["reopenedAuthenticated"], "reopenedWebsocketAttempts": state["reopenedWebsocket"], "members": len(state["members"])}
