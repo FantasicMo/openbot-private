@@ -7,13 +7,20 @@ import { once } from "node:events";
 import { mkdir, writeFile } from "node:fs/promises";
 import { createServer, type Server } from "node:http";
 import { join, resolve } from "node:path";
-import type { HostStatus } from "@openbot/contracts/ipc";
+import {
+  type AgentEvent,
+  type AgentStatus,
+  type HostStatus,
+  isAgentStatus,
+  type TeamRealtimeEvent,
+} from "@openbot/contracts/ipc";
 import { TEAM_API_ROUTES } from "@openbot/contracts/team-api-routes";
 import { teamCapabilitiesForProtocol } from "@openbot/contracts/team-protocol/current";
 import { teamHttpCodec } from "@openbot/contracts/team-protocol/http-codecs";
 import { encodeTeamProtocolV8BaseCurrentEvent } from "@openbot/contracts/team-protocol/v8-base-adapter";
 import { sourceText } from "@openbot/i18n/source";
 import { PRIVATE_PAIRING_PATH } from "@openbot/private-access/contracts";
+import { agentEventCanNotify } from "@openbot/team-client/agent-notifications";
 import { MOBILE_ATTACHMENT_BYTES } from "@openbot/team-client/remote-peer";
 import { Effect } from "effect";
 import { type WebSocket, WebSocketServer } from "ws";
@@ -21,6 +28,10 @@ import { MAX_PRIVATE_HOSTS, PrivateMobileError } from "../apps/mobile/src/featur
 import { PrivateHostStore } from "../apps/mobile/src/features/private-access/private-host-store";
 import { PrivateHttpTransport } from "../apps/mobile/src/features/private-access/private-http-transport";
 import type { PrivateNetworkPort } from "../apps/mobile/src/features/private-access/private-ports";
+import {
+  type MobileAgentActivities,
+  reduceAgentActivity,
+} from "../apps/mobile/src/features/workspace/model/agent-activity";
 import { contentDispositionFileName } from "../src/main/content-disposition";
 import { PrivateAccessHostService } from "../src/main/private-access-host";
 import { TeamStore } from "../src/main/team-store";
@@ -76,6 +87,26 @@ async function main() {
   const identity = store.getIdentity();
   assert.ok(identity);
   const codec = teamHttpCodec(9);
+  const diagnosticMessage = "Fixture provider diagnostic";
+  const providerStatus: AgentStatus = {
+    phase: "ready",
+    cliVersion: "fixture",
+    auth: { kind: "chatgpt", email: null },
+    providers: [
+      {
+        id: "codex",
+        state: "available",
+        version: "fixture",
+        message: "Fixture provider message",
+        checkError: "Fixture sign-in check",
+        lastError: diagnosticMessage,
+        lastErrorAt: 1,
+      },
+    ],
+    capabilities: { chat: "ready", browser: "unavailable", computerUse: "unavailable" },
+    message: null,
+    fullAccess: true,
+  };
   const frames: string[] = [];
   const requests: { method: string; path: string }[] = [];
   const messages: unknown[] = [];
@@ -137,6 +168,11 @@ async function main() {
         return;
       }
       assert.equal(request.headers["openbot-protocol-version"], "9");
+      if (url.pathname === TEAM_API_ROUTES.agents.status && method === "GET") {
+        response.writeHead(200, { "Content-Type": "application/json" });
+        response.end(codec.encodeResponse(method, url.pathname, 200, providerStatus, {}));
+        return;
+      }
       if (url.pathname === TEAM_API_ROUTES.attachment("fixture-file")) {
         response.writeHead(200, {
           "Content-Type": "application/octet-stream",
@@ -330,10 +366,17 @@ async function main() {
   );
   const updates: string[] = [];
   const events: string[] = [];
+  const receivedEvents: (AgentEvent | TeamRealtimeEvent)[] = [];
   const transport = new PrivateHttpTransport(
     network,
     () => hosts.host(identity.serverId),
-    { connection: (update) => updates.push(update.state), event: (_id, event) => events.push(event.type) },
+    {
+      connection: (update) => updates.push(update.state),
+      event: (_id, event) => {
+        events.push(event.type);
+        receivedEvents.push(event);
+      },
+    },
     "1.4.4",
   );
   let capacityPersisted: string | null = null;
@@ -539,6 +582,78 @@ async function main() {
       assert.equal(scope.type, "agent-event-scope");
       assert.equal(scope.includeConversations, true);
       assert.ok(scope.capabilities.includes("long-capability-lists-v1"));
+    });
+    await step("diagnostic_replay_preserves_mobile_activity_and_released_status_projection", async () => {
+      // Replay through the released codec and real transport; no provider or native UI runs here.
+      const replay = async (event: AgentEvent | TeamRealtimeEvent) => {
+        const frame = encodeTeamProtocolV8BaseCurrentEvent(event);
+        assert.ok(frame, "The released codec must accept the fixture event.");
+        assert.equal(sessions.size, 1);
+        const count = receivedEvents.length;
+        for (const peer of sessions.keys()) peer.send(frame);
+        await until(() => receivedEvents.length > count);
+        assert.equal(receivedEvents.length, count + 1);
+        const received = receivedEvents[count];
+        assert.ok(received);
+        assert.equal(received.type, event.type);
+        return received;
+      };
+      const assertProjectedStatus = (status: AgentStatus) => {
+        const provider = status.providers?.find((row) => row.id === "codex");
+        assert.ok(provider);
+        assert.equal(provider.state, "available");
+        assert.equal(provider.message, "Fixture provider message");
+        assert.equal(provider.checkError, "Fixture sign-in check");
+        assert.equal(Object.hasOwn(provider, "lastError"), false);
+        assert.equal(Object.hasOwn(provider, "lastErrorAt"), false);
+        assert.equal(JSON.stringify(status).includes(diagnosticMessage), false);
+      };
+      const status = await transport.request("GET", TEAM_API_ROUTES.agents.status, (value) => {
+        assert.ok(isAgentStatus(value));
+        return value;
+      });
+      assertProjectedStatus(status);
+      const statusEvent = await replay({ type: "status", status: providerStatus });
+      assert.equal(statusEvent.type, "status");
+      if (statusEvent.type !== "status") throw new Error("The fixture must receive a status event.");
+      assertProjectedStatus(statusEvent.status);
+      const initial: MobileAgentActivities = {
+        "fixture-agent": { turnId: "fixture-turn", phase: "working", detail: "Fixture work" },
+      };
+      assert.strictEqual(reduceAgentActivity(initial, statusEvent), initial);
+      assert.equal(agentEventCanNotify(statusEvent), false);
+      for (const agentId of [undefined, "fixture-agent"]) {
+        const diagnostic = await replay({
+          type: "error",
+          ...(agentId ? { agentId } : {}),
+          code: "codex_diagnostic",
+          message: diagnosticMessage,
+        });
+        assert.equal(diagnostic.type, "error");
+        if (diagnostic.type !== "error") throw new Error("The fixture must receive an error event.");
+        assert.equal(diagnostic.code, "codex_diagnostic");
+        assert.equal(diagnostic.message, diagnosticMessage);
+        assert.equal(diagnostic.agentId, agentId);
+        assert.strictEqual(reduceAgentActivity(initial, diagnostic), initial);
+        assert.equal(agentEventCanNotify(diagnostic), false);
+      }
+      const failedTurn = await replay({
+        type: "turn-completed",
+        agentId: "fixture-agent",
+        threadId: "fixture-thread",
+        turnId: "fixture-turn",
+        status: "failed",
+      });
+      assert.equal(agentEventCanNotify(failedTurn), true);
+      assert.deepEqual(reduceAgentActivity(initial, failedTurn), {});
+      const failedDelivery = await replay({
+        type: "error",
+        agentId: "fixture-agent",
+        code: "delivery_start_failed",
+        message: "Fixture delivery refused",
+      });
+      assert.equal(agentEventCanNotify(failedDelivery), true);
+      assert.strictEqual(reduceAgentActivity(initial, failedDelivery), initial);
     });
     const message = {
       text: "Fixture message",
