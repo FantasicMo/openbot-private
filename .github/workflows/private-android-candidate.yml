@@ -87,6 +87,9 @@ jobs:
         run: |
           set -euo pipefail
           test -d "$ANDROID_HOME"
+          export PATH="$ANDROID_HOME/cmdline-tools/latest/bin:$ANDROID_HOME/platform-tools:$ANDROID_HOME/emulator:$PATH"
+          printf '%s\n' "$ANDROID_HOME/cmdline-tools/latest/bin" "$ANDROID_HOME/platform-tools" "$ANDROID_HOME/emulator" >> "$GITHUB_PATH"
+          printf 'Android SDK: %s\n' "$ANDROID_HOME"
           command -v sdkmanager
           # Gradle installs the SDK/NDK versions selected by the locked Expo/RN packages.
           # Ignore only the expected SIGPIPE of yes after sdkmanager closes its input.
@@ -268,6 +271,9 @@ jobs:
           [[ "$RUNNER_ENVIRONMENT" == 'github-hosted' && "$RUNNER_OS" == 'Linux' ]]
           test -c /dev/kvm
           sudo chmod a+rw /dev/kvm
+          export PATH="$ANDROID_HOME/cmdline-tools/latest/bin:$ANDROID_HOME/platform-tools:$ANDROID_HOME/emulator:$PATH"
+          printf '%s\n' "$ANDROID_HOME/cmdline-tools/latest/bin" "$ANDROID_HOME/platform-tools" "$ANDROID_HOME/emulator" >> "$GITHUB_PATH"
+          printf 'Android SDK: %s\n' "$ANDROID_HOME"
           command -v sdkmanager
           command -v avdmanager
           set +o pipefail
