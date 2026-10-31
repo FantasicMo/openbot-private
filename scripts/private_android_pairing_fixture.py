@@ -225,6 +225,7 @@ def native_pairing_fixture(device, shell, package, activity, uid, chain, tables,
                 evidence["lastUi"] = {
                     "pairingInputPresent": any(node.get("class", "").endswith("EditText") for node in current.iter("node")),
                     "fixtureOfferPresent": any(node.get("class", "").endswith("EditText") and node.get("text", "") == input_text for node in current.iter("node")),
+                    "pairingLabelPresent": "Pairing link or JSON" in values,
                     "pairButtonPresent": "Pair host" in values,
                     "identityRejected": "The host identity could not be verified." in values,
                     "offerRejected": "This private pairing offer is invalid." in values,
@@ -309,7 +310,9 @@ def native_pairing_fixture(device, shell, package, activity, uid, chain, tables,
             stage = "pair-valid-proof"
             launch_offer("valid-proof")
             stage = "pair-valid-proof"
-            wait_for(lambda value: state["pair"] == 1 and not any(node.get("class", "").endswith("EditText") for node in value.iter("node")))
+            # ConnectedScreen renders HomeSearchBar with a native TextInput. Require the actual
+            # pairing form to disappear, rather than rejecting every editable field on that screen.
+            wait_for(lambda value: state["pair"] == 1 and len(state["members"]) == 1 and state["authenticated"] > 0 and not any(item in text_values(value) for item in (input_text, "Pairing link or JSON", "Pair host", "Scan pairing QR code")))
             evidence["steps"].append({"name": "valid_Ed25519_proof_pair_POST_and_saved_native_session", "passed": True})
             stage = "reopen-saved-session"
             shell("am", "force-stop", package)
