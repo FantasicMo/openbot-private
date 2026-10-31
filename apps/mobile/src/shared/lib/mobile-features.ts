@@ -8,6 +8,7 @@ import {
 import * as Application from "expo-application";
 import Constants, { ExecutionEnvironment } from "expo-constants";
 import { create } from "zustand";
+import { isPrivateBuild } from "@/features/private-access/private-build";
 import { devFeatureOverride, devLatestAppVersion } from "@/shared/lib/dev-feature-overrides";
 import { isAndroid, isIOS } from "@/shared/lib/platform";
 
@@ -34,6 +35,7 @@ const useMobileFeatures = create<{
 }));
 
 export async function refreshMobileFeatures(apiUrl: string, force = false): Promise<MobileFeatureFlags> {
+  if (isPrivateBuild) return mobileFeaturesOff();
   const current = useMobileFeatures.getState();
   if (current.apiUrl !== apiUrl) {
     useMobileFeatures.setState({ apiUrl, flags: mobileFeaturesOff(), latestVersion: null, checkedAt: 0 });
@@ -78,11 +80,11 @@ export function currentAppVersion(): string | null {
 /** One flag for the account server of this session. It is off for another account server. */
 export function useMobileFeature(apiUrl: string, feature: keyof MobileFeatureFlags): boolean {
   const on = useMobileFeatures((state) => state.apiUrl === apiUrl && state.flags[feature]);
-  return devFeatureOverride(feature) ?? on;
+  return !isPrivateBuild && (devFeatureOverride(feature) ?? on);
 }
 
 /** The newest store version for the account server of this session. Null until it answers. */
 export function useLatestAppVersion(apiUrl: string): string | null {
   const latest = useMobileFeatures((state) => (state.apiUrl === apiUrl ? state.latestVersion : null));
-  return devLatestAppVersion() ?? latest;
+  return isPrivateBuild ? null : (devLatestAppVersion() ?? latest);
 }

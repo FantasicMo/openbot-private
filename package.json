@@ -392,6 +392,7 @@
     "@openbot/contracts": "workspace:*",
     "@openbot/i18n": "workspace:*",
     "@openbot/logging": "workspace:*",
+    "@openbot/private-access": "workspace:*",
     "@openbot/team-client": "workspace:*",
     "@openbot/telemetry": "workspace:*",
     "@openbot/ui": "workspace:*",

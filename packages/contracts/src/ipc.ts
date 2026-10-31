@@ -65,6 +65,7 @@ export * from "./ipc-mcp-servers";
 export * from "./ipc-messaging";
 export * from "./ipc-notifications";
 export * from "./ipc-onepassword-connector";
+export * from "./ipc-private-access";
 export * from "./ipc-prompt-cache";
 export * from "./ipc-provider-admin";
 export * from "./ipc-provider-detection";

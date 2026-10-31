@@ -25,6 +25,7 @@ import { useAppearanceChoice } from "../../appearance-choice";
 import { useI18n } from "../../i18n-context";
 import { useInterfaceSizeChoice } from "../../interface-size";
 import { useLogoColorChoice } from "../../logo-color";
+import { PRIVATE_BUILD } from "../private-access/private-build";
 import { ExternalLinkSelect } from "./ExternalLinkSelect";
 
 const interfaceSizeOptions = [...APP_INTERFACE_SIZES];
@@ -214,17 +215,19 @@ export function SettingsGeneralTab(props: SettingsGeneralTabProps) {
         </ItemGroup>
       </SettingsSection>
 
-      <SettingsSection title={i18n.t("settings.permissions.title")}>
-        <ItemGroup class="settings-modal-card">
-          <SwitchField
-            data-settings-row="settings.analytics.title"
-            checked={props.value.productAnalytics}
-            onChange={(checked) => props.onUpdateSetting("productAnalytics", checked)}
-            label={i18n.t("settings.analytics.title")}
-            description={i18n.t("settings.analytics.description")}
-          />
-        </ItemGroup>
-      </SettingsSection>
+      <Show when={!PRIVATE_BUILD}>
+        <SettingsSection title={i18n.t("settings.permissions.title")}>
+          <ItemGroup class="settings-modal-card">
+            <SwitchField
+              data-settings-row="settings.analytics.title"
+              checked={props.value.productAnalytics}
+              onChange={(checked) => props.onUpdateSetting("productAnalytics", checked)}
+              label={i18n.t("settings.analytics.title")}
+              description={i18n.t("settings.analytics.description")}
+            />
+          </ItemGroup>
+        </SettingsSection>
+      </Show>
     </>
   );
 }

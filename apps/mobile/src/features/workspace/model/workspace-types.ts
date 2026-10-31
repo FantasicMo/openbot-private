@@ -118,13 +118,14 @@ import type {
   WebhookSecret,
 } from "@openbot/contracts/ipc-events";
 import type { QueueEditRequest } from "@openbot/contracts/team-protocol/queue-edit-v1";
-import type { RemoteConnectionFailure, RemoteRecoveryStatus, RemoteTeamDirectoryClient } from "@openbot/team-client";
+import type { RemoteConnectionFailure, RemoteRecoveryStatus } from "@openbot/team-client";
 import type { PlanLimits } from "@openbot/team-client/plan-limits";
 import type { RemoteFileUpload } from "@openbot/team-client/remote-peer";
 import type { MessagingConnectorPage } from "@openbot/team-client/team-admin-requests";
 import type { MobileBrowserTab } from "@/features/browser/model/browser-tabs";
 import type { BrowserViewBridgeEvent, RemoteBrowserViewSession } from "@/features/browser/model/browser-view-bridge";
 import type { MobileChannelStore } from "@/features/channels/model/channel-store";
+import type { MobileDirectoryPort } from "@/features/private-access/private-ports";
 import type { ProviderAdmin } from "@/features/servers/model/provider-admin";
 import type { MobileConversationStore } from "./conversation-store";
 import type { LiveWorkspaceStore } from "./live-workspace-store";
@@ -267,7 +268,7 @@ export interface MobileWorkspaceContextValue {
    * has sent no presence yet has no entry. The account service member list is not read for it.
    */
   memberCountByServer: Readonly<Record<string, number>>;
-  teamDirectory: RemoteTeamDirectoryClient;
+  teamDirectory: MobileDirectoryPort;
   serverDirectoryState: MobileServerDirectoryState;
   serverDirectoryError: string | null;
   agents: MobileAgent[];
@@ -692,6 +693,7 @@ export interface MobileWorkspaceContextValue {
     serverId?: string,
     /** Hears the fraction of the file sent so far, from 0 to 1. */
     onProgress?: (fraction: number) => void,
+    transferId?: string,
   ) => Promise<DraftAttachment>;
   downloadAttachment: (serverId: string, attachmentId: string) => Promise<RemoteFileUpload>;
   discardAttachment: (agentId: string, attachmentId: string, serverId?: string) => Promise<void>;

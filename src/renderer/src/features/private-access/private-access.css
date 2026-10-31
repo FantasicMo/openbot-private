@@ -1,0 +1,28 @@
+.private-access-panel {
+  display: grid;
+  gap: 24px;
+}
+
+.private-access-panel .ui-settings-section {
+  display: grid;
+  gap: 12px;
+  justify-items: start;
+}
+
+.private-access-panel .ui-field,
+.private-access-panel .settings-modal-card {
+  width: 100%;
+}
+
+.private-access-offer {
+  display: grid;
+  gap: 12px;
+  justify-items: start;
+  max-width: 100%;
+}
+
+.private-access-empty {
+  margin: 0;
+  padding: 12px;
+  color: var(--openbot-text-muted);
+}

@@ -29,6 +29,7 @@ import { useCSSVariable, useUniwind } from "uniwind";
 import { showFailureAlert } from "@/features/analytics/failure-reports";
 import type { MobileSession } from "@/features/auth/api/mobile-auth";
 import { mobileUserName } from "@/features/auth/api/mobile-user-name";
+import { isPrivateBuild } from "@/features/private-access/private-build";
 import { hostedServerCalls } from "@/features/servers/api/hosted-servers";
 import {
   refreshHostedServerAvailability,
@@ -64,7 +65,7 @@ interface ServerDrawerContentProps {
   /** True after the drawer has opened: the drawer then reads its values from the host. */
   open: boolean;
   servers: MobileServer[];
-  session: MobileSession;
+  session: MobileSession | null;
   topInset: number;
   onNavigate: (href: Href) => void;
   onLeave: (serverId: string) => Promise<void>;
@@ -111,8 +112,8 @@ export const ServerDrawerContent = memo(function ServerDrawerContent({
   // Android: the row's own long press opens its menu, as on the agent rows. `shouldOpenOnLongPress`
   // does not open it there, because the row takes the long press.
   const menus = useRef(new Map<string, MenuComponentRef | null>());
-  const displayName = mobileUserName(session.user);
-  const avatarUrl = session.user.avatarUrl ? new URL(session.user.avatarUrl, session.apiUrl).toString() : null;
+  const displayName = session ? mobileUserName(session.user) : t("mobile.private.device");
+  const avatarUrl = session?.user.avatarUrl ? new URL(session.user.avatarUrl, session.apiUrl).toString() : null;
   const mutedColor = String(muted);
   const [editing, setEditing] = useState(false);
   const [dragging, setDragging] = useState(false);
@@ -126,12 +127,13 @@ export const ServerDrawerContent = memo(function ServerDrawerContent({
   const showsList = listOpen || editing || !activeServer;
   const memberCount = useDrawerMemberCount(activeServer?.id ?? "");
   const hostedServerIds = useHostedServerAvailability((state) =>
-    state.userId === session.user.id ? state.serverIds : null,
+    session && state.userId === session.user.id ? state.serverIds : null,
   );
   const exiting = useRef(false);
   // The same rules as the server settings screen. The owner cannot leave. Billing deletes a hosted
   // server, so Remove shows only after the hosted servers are known.
   function serverExit(server: MobileServer): ServerExit | null {
+    if (!session) return "leave";
     if (server.role !== "owner") return "leave";
     return hostedServerIds && !hostedServerIds.has(server.id) ? "remove" : null;
   }
@@ -148,7 +150,11 @@ export const ServerDrawerContent = memo(function ServerDrawerContent({
         subactions: [
           {
             id: exit,
-            title: exit === "leave" ? t("mobile.server.settings.leave") : t("mobile.server.settings.remove"),
+            title: !session
+              ? t("mobile.private.forgetHost")
+              : exit === "leave"
+                ? t("mobile.server.settings.leave")
+                : t("mobile.server.settings.remove"),
             image: exit === "leave" ? "rectangle.portrait.and.arrow.right" : "trash",
             attributes: { destructive: true },
           },
@@ -159,6 +165,13 @@ export const ServerDrawerContent = memo(function ServerDrawerContent({
 
   // The server leaves the list after it succeeds, and the workspace selects another server if it was active.
   function confirmExit(server: MobileServer, exit: ServerExit) {
+    if (!session) {
+      Alert.alert(t("mobile.private.forgetHost"), server.name, [
+        { text: t("common.cancel"), style: "cancel" },
+        { text: t("mobile.private.forgetHost"), style: "destructive", onPress: () => void exitServer(server, "leave") },
+      ]);
+      return;
+    }
     const leave = exit === "leave";
     Alert.alert(
       leave
@@ -216,11 +229,13 @@ export const ServerDrawerContent = memo(function ServerDrawerContent({
 
   // The plus button opens the plans and the account's hosted servers when the account can have
   // hosted servers and the feature flag of this build is on. A development build can override both.
-  const accountHasPlans = useHostedServerAvailability((state) => state.userId === session.user.id && state.available);
-  const cloudServersOn = useMobileFeature(session.apiUrl, "cloudServers");
-  const showsPlans = devFeatureOverride("cloudServers") ?? (accountHasPlans && cloudServersOn);
+  const accountHasPlans = useHostedServerAvailability((state) =>
+    Boolean(session && state.userId === session.user.id && state.available),
+  );
+  const cloudServersOn = useMobileFeature(session?.apiUrl ?? "", "cloudServers");
+  const showsPlans = Boolean(session) && (devFeatureOverride("cloudServers") ?? (accountHasPlans && cloudServersOn));
   useEffect(() => {
-    if (!open) return;
+    if (!open || !session) return;
     void refreshHostedServerAvailability(session.user.id, hostedServerCalls(session));
     void refreshMobileFeatures(session.apiUrl);
   }, [open, session]);
@@ -239,7 +254,14 @@ export const ServerDrawerContent = memo(function ServerDrawerContent({
       ...(editing
         ? []
         : [
-            ...(exit === "leave" ? [{ name: "leave", label: t("mobile.server.settings.leave") }] : []),
+            ...(exit === "leave"
+              ? [
+                  {
+                    name: "leave",
+                    label: !session ? t("mobile.private.forgetHost") : t("mobile.server.settings.leave"),
+                  },
+                ]
+              : []),
             ...(exit === "remove" ? [{ name: "remove", label: t("mobile.server.settings.remove") }] : []),
           ]),
       ...(listIndex > 0 ? [{ name: "moveUp", label: t("mobile.server.drawer.moveUp") }] : []),
@@ -465,7 +487,7 @@ export const ServerDrawerContent = memo(function ServerDrawerContent({
               {displayName}
             </Typography.Paragraph>
             <Typography.Paragraph className="text-text-secondary" numberOfLines={1} selectable style={typeScale.small}>
-              {session.user.email}
+              {session?.user.email}
             </Typography.Paragraph>
           </View>
         </View>
@@ -545,12 +567,14 @@ function DrawerServerTools({
           <DrawerPinnedWorkflows serverId={serverId} pinned={workflows.pinned} onNavigate={onNavigate} />
         </>
       ) : null}
-      <DrawerRow
-        icon={ShoppingBag}
-        label={t("mobile.app.route.marketplace")}
-        href={routes.marketplace}
-        onNavigate={onNavigate}
-      />
+      {!isPrivateBuild ? (
+        <DrawerRow
+          icon={ShoppingBag}
+          label={t("mobile.app.route.marketplace")}
+          href={routes.marketplace}
+          onNavigate={onNavigate}
+        />
+      ) : null}
       <DrawerRow
         icon={ChartColumn}
         label={t("mobile.app.route.usage")}
@@ -558,13 +582,15 @@ function DrawerServerTools({
         href={routes.usage}
         onNavigate={onNavigate}
       />
-      <DrawerRow
-        icon={UsersRound}
-        label={t("mobile.app.route.members")}
-        value={values.members}
-        href={routes.members}
-        onNavigate={onNavigate}
-      />
+      {!isPrivateBuild ? (
+        <DrawerRow
+          icon={UsersRound}
+          label={t("mobile.app.route.members")}
+          value={values.members}
+          href={routes.members}
+          onNavigate={onNavigate}
+        />
+      ) : null}
       <DrawerDivider />
       <DrawerRow
         icon={Settings2}

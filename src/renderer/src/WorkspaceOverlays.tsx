@@ -32,6 +32,7 @@ import { useCustomProviders } from "./features/custom-providers/custom-providers
 import { useProviderDetection } from "./features/custom-providers/provider-detection-context";
 import type { ServerStorageOptions } from "./features/files/ServerStoragePanel";
 import { useSetup } from "./features/onboarding/onboarding-context";
+import { PRIVATE_BUILD } from "./features/private-access/private-build";
 import { useRemoteDesktop } from "./features/remote-desktop/remote-desktop-context";
 import { desktopScheduleSource } from "./features/schedule/schedule-port";
 import { AddServerOverlay } from "./features/servers/AddServerOverlay";
@@ -74,6 +75,9 @@ import {
 interface AccountProps {
   account: () => CentralAuthUser;
 }
+interface WorkspaceAccountProps {
+  account: () => CentralAuthUser | null;
+}
 
 /**
  * Everything the workspace raises over itself: modals, dialogs and the two
@@ -91,7 +95,7 @@ interface AccountProps {
  * The overlays the web client also raises are views in `WorkspaceOverlayViews`, which take props:
  * the components here read the desktop contexts and pass them on.
  */
-export function WorkspaceOverlays(props: AccountProps) {
+export function WorkspaceOverlays(props: WorkspaceAccountProps) {
   const { skillsMarketplaceOpen } = useSettings();
   const connectors = useConnectors();
   /* The overlays mount with the app. A first read that failed then must not hide a connector for
@@ -103,10 +107,16 @@ export function WorkspaceOverlays(props: AccountProps) {
   return (
     <>
       <SharedAgentInstall />
-      <JoinServer account={props.account} />
-      <AddServer />
-      <CreateLocalServer />
-      <HostedUpsell account={props.account} />
+      <Show when={!PRIVATE_BUILD && props.account()}>
+        {(account) => (
+          <>
+            <JoinServer account={account} />
+            <AddServer />
+            <CreateLocalServer />
+            <HostedUpsell account={account} />
+          </>
+        )}
+      </Show>
       <LeaveServer />
       <RestartServer />
       <ServerSettings />
@@ -853,7 +863,7 @@ function trackHostedSiteDelete(): (result: HostedSiteDeleteResult) => void {
  * Application settings, shown as a page of the window. The only overlay without a
  * `<Show>`: the settings own their open state and wait for the page placement.
  */
-function AppSettings(props: AccountProps) {
+function AppSettings(props: WorkspaceAccountProps) {
   const windowPage = useWindowPage();
   const platform = usePlatform();
   const auth = useAuth();

@@ -2,6 +2,7 @@ import { ANALYTICS_GENERATIONS } from "@openbot/telemetry";
 import { OpenPanel, type TrackHandlerPayload } from "@openpanel/react-native";
 import * as Application from "expo-application";
 import { Platform } from "react-native";
+import { isPrivateBuild } from "@/features/private-access/private-build";
 import { MobileAnalytics } from "./analytics-core";
 import { MOBILE_EVENTS, type MobileEventName, sanitizeMobileEvent } from "./events";
 import { mobileReportQueue } from "./failure-reports";
@@ -42,6 +43,7 @@ function filterMobilePayload(event: TrackHandlerPayload): boolean {
 }
 
 export const mobileAnalytics = new MobileAnalytics(() => {
+  if (isPrivateBuild) return null;
   const clientId = process.env.EXPO_PUBLIC_OPENPANEL_CLIENT_ID;
   const clientSecret = process.env.EXPO_PUBLIC_OPENPANEL_CLIENT_SECRET;
   if (

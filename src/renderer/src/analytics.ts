@@ -27,6 +27,7 @@ import { normalizeEmailAddress } from "@openbot/contracts/validation";
 import { ANALYTICS_GENERATIONS } from "@openbot/telemetry";
 import { OpenPanelBase, type OpenPanelOptions } from "@openpanel/web";
 import { ANALYTICS_SCHEMA_VERSION, configureDesktopReports, configureErrorReports } from "./error-reports";
+import { PRIVATE_BUILD } from "./features/private-access/private-build";
 import { MARKETPLACE_PLUGINS } from "./features/settings/marketplace-plugin-catalog";
 
 const OPENPANEL_API_URL = "https://analytics.openbot.run/api";
@@ -830,8 +831,8 @@ class DesktopAnalytics {
   readonly #productionBuild: boolean;
   #client: OpenPanelClient | null = null;
   #anonymousClient: OpenPanelClient | null = null;
-  #disabled = false;
-  #trackingEnabled = true;
+  #disabled = PRIVATE_BUILD;
+  #trackingEnabled = !PRIVATE_BUILD;
   #identity: AnalyticsIdentity | null = null;
   #pending: PendingEvent[] = [];
   readonly #clientQueue: AnalyticsOperationQueue = { active: false, operations: [] };
@@ -846,6 +847,7 @@ class DesktopAnalytics {
   }
 
   configure(appInfo: AppInfo): boolean {
+    if (PRIVATE_BUILD || appInfo.privateBuild) return false;
     configureDesktopReports(appInfo, this.#trackingEnabled, this.#identity);
     if (this.#client) return true;
     if (!shouldEnableDesktopAnalytics(appInfo, this.#productionBuild)) {
@@ -946,6 +948,7 @@ class DesktopAnalytics {
    * loaded at start, a reverted save or another tab's change records nothing.
    */
   setTrackingEnabled(enabled: boolean, options: { recordOptOut?: boolean } = {}): void {
+    if (PRIVATE_BUILD) return;
     if (this.#trackingEnabled === enabled) return;
     this.#trackingEnabled = enabled;
     configureErrorReports(enabled, this.#identity?.id ?? null);

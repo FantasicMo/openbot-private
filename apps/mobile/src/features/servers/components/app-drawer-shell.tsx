@@ -23,6 +23,7 @@ import Animated, {
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { scheduleOnRN } from "react-native-worklets";
 import { useMobileSession } from "@/features/auth/context/mobile-session-context";
+import { useMobileWorkspaceAccess } from "@/features/private-access/mobile-workspace-access";
 import { AppDrawerShownContext, AppDrawerShownOnUIContext } from "@/features/servers/components/app-drawer-activity";
 import { ServerDrawerContent } from "@/features/servers/components/server-drawer-content";
 import {
@@ -69,6 +70,7 @@ export function AppDrawerShell({ children }: PropsWithChildren) {
   const { width } = useWindowDimensions();
   const insets = useSafeAreaInsets();
   const { session } = useMobileSession();
+  const access = useMobileWorkspaceAccess();
   const { t } = useText();
   // The shell holds every screen, so it reads only what the drawer shows: a change elsewhere in the
   // workspace does not render the drawer again.
@@ -126,12 +128,12 @@ export function AppDrawerShell({ children }: PropsWithChildren) {
   }, [drawerOpenOnUI, drawerProgress, finishClosing]);
 
   useEffect(() => {
-    if (session) return;
+    if (access) return;
     drawerOpenOnUI.set(false);
     setDrawerOpen(false);
     setDrawerSettled(false);
     drawerProgress.set(0);
-  }, [drawerOpenOnUI, drawerProgress, session]);
+  }, [drawerOpenOnUI, drawerProgress, access]);
 
   // The phase changes only at the closed and open places, so React renders twice for each motion and
   // not on each frame.
@@ -278,7 +280,7 @@ export function AppDrawerShell({ children }: PropsWithChildren) {
     [closeDrawer, openDrawer, openingGesture],
   );
 
-  if (!session) {
+  if (!access) {
     return <AppDrawerContext.Provider value={contextValue}>{children}</AppDrawerContext.Provider>;
   }
 

@@ -88,6 +88,10 @@ interface HostEvents {
 type ForwardedApiOptions = ConstructorParameters<typeof TeamApiServer>[0];
 
 interface HostServiceOptions {
+  /** Private forks bind this host to its real local owner without an account identity. */
+  identityAuthority?: "account" | "local";
+  /** Where membership and invitations are authoritative. Released account behavior is the default. */
+  directoryAuthority?: "account" | "local";
   channels?: ChannelService;
   mcpServers?: ForwardedApiOptions["mcpServers"];
   mcpSignIns?: ForwardedApiOptions["mcpSignIns"];
@@ -134,8 +138,11 @@ interface HostServiceOptions {
   logDirectory?: string;
   removeLegacyRemoteDesktopCredential?: () => Effect.Effect<void, RemoteWorkflowError>;
   getSignedInUser: () => CentralAuthUser;
-  redeemCentralTicket: (ticket: string, serverId: string) => Effect.Effect<CentralAuthUser | null, RemoteWorkflowError>;
-  sendTeamInviteEmail: (input: {
+  redeemCentralTicket?: (
+    ticket: string,
+    serverId: string,
+  ) => Effect.Effect<CentralAuthUser | null, RemoteWorkflowError>;
+  sendTeamInviteEmail?: (input: {
     email: string;
     serverName: string;
     inviteUrl: string;
@@ -596,6 +603,7 @@ export class HostService extends EventEmitter<HostEvents> {
    * startup reporting the account the file was already loaded for.
    */
   unbindChangedAccount(user: CentralAuthUser | null): void {
+    if (this.#options.identityAuthority === "local") return;
     const nextAccountId = user?.id ?? null;
     if (this.#boundAccountId === undefined || this.#boundAccountId === nextAccountId) return;
     if (!this.#options.store.configured) return;
@@ -610,6 +618,7 @@ export class HostService extends EventEmitter<HostEvents> {
 
   readonly applySignedInAccount = Effect.fn("HostService.applySignedInAccount")(
     function* (this: HostService, user: CentralAuthUser | null): Effect.fn.Return<void, RemoteWorkflowError> {
+      if (this.#options.identityAuthority === "local") return;
       const nextAccountId = user?.id ?? null;
       // `unbindChangedAccount` may have cleared the store since this account was bound, to
       // stop it answering for an account that was on its way out. Reporting the same account
@@ -693,6 +702,7 @@ export class HostService extends EventEmitter<HostEvents> {
 
   readonly configure = Effect.fn("HostService.configure")(
     function* (this: HostService, input: ConfigureHostInput): Effect.fn.Return<HostStatus, RemoteWorkflowError> {
+      if (this.#options.identityAuthority === "local") return yield* this.updateIdentity(input);
       const optionalRegisterRemoteHost = this.#options.registerRemoteHost;
       const optionalUpdateRemoteHostLogo = this.#options.updateRemoteHostLogo;
       const account = yield* remoteDecode(() => this.#options.getSignedInUser());
@@ -759,7 +769,7 @@ export class HostService extends EventEmitter<HostEvents> {
     function* (this: HostService, input: UpdateHostIdentityInput): Effect.fn.Return<HostStatus, RemoteWorkflowError> {
       const optionalRegisterRemoteHost = this.#options.registerRemoteHost;
       const optionalUpdateRemoteHostLogo = this.#options.updateRemoteHostLogo;
-      yield* remoteDecode(() => this.#options.store.assertOwnerAccount(this.#options.getSignedInUser()));
+      yield* remoteDecode(() => this.#assertCurrentOwner());
       const identity = yield* this.#options.store.updateIdentity(input);
       // Before anything is published: the store checked the account before it resolved, and a
       // switch landing in this gap would show the previous account's name and logo.
@@ -870,6 +880,7 @@ export class HostService extends EventEmitter<HostEvents> {
   }
 
   readonly start = Effect.fn("HostService.start")(function* (this: HostService) {
+    if (this.#options.identityAuthority === "local") return yield* this.startLoopbackOnly();
     if (this.#startOperation) return yield* Fiber.join(this.#startOperation);
     const operation = yield* Effect.forkIn(this.#provide(this.#startRuntimeOperation()), this.#runtime.scope, {
       startImmediately: false,
@@ -1039,8 +1050,7 @@ export class HostService extends EventEmitter<HostEvents> {
       if (this.#status.phase === "unconfigured") return this.getStatus();
       const serverId = this.#options.store.getIdentity()?.serverId;
       this.#runtimeGeneration += 1;
-      if (persistPreference)
-        yield* remoteDecode(() => this.#options.store.assertOwnerAccount(this.#options.getSignedInUser()));
+      if (persistPreference) yield* remoteDecode(() => this.#assertCurrentOwner());
       this.#setStatus({ phase: "stopping", message: sourceText("status.host.stopping") });
       yield* this.#stopRuntime();
       if (this.#startOperation) yield* Fiber.join(this.#startOperation);
@@ -1312,6 +1322,10 @@ export class HostService extends EventEmitter<HostEvents> {
         yield* this.#forgetNotificationLevels(memberId);
         return;
       }
+      // Close media and browser resources while the member's session IDs still exist.
+      // Keep the store's owner-removal rejection free of session side effects.
+      if (this.#options.store.listMembers().some((member) => member.id === memberId && member.role !== "owner"))
+        yield* this.#revokeMemberSessions(memberId);
       yield* this.#options.store.removeMember(memberId);
       if (hostId) yield* this.#forgetMemberRoles(hostId, memberId);
       yield* this.#forgetNotificationLevels(memberId);
@@ -1448,6 +1462,7 @@ export class HostService extends EventEmitter<HostEvents> {
    * them in its own team file, so every read and write of them goes where the others went.
    */
   #usesAccountDirectory(): boolean {
+    if (this.#options.directoryAuthority) return this.#options.directoryAuthority === "account";
     return !this.#options.localDevelopmentHost;
   }
 
@@ -1505,7 +1520,7 @@ export class HostService extends EventEmitter<HostEvents> {
         if (input.email) {
           const email = input.email;
           const attempt4 = yield* Effect.gen({ self: this }, function* () {
-            yield* this.#options.sendTeamInviteEmail({
+            yield* this.#sendInviteEmail({
               email,
               serverName: identity.serverName,
               inviteUrl,
@@ -1561,7 +1576,7 @@ export class HostService extends EventEmitter<HostEvents> {
       if (invite.email) {
         const email = invite.email;
         const attempt3 = yield* Effect.gen({ self: this }, function* () {
-          yield* this.#options.sendTeamInviteEmail({
+          yield* this.#sendInviteEmail({
             email,
             serverName: identity.serverName,
             inviteUrl: result.inviteUrl,
@@ -1594,6 +1609,23 @@ export class HostService extends EventEmitter<HostEvents> {
         ),
       );
     });
+  }
+
+  #sendInviteEmail(input: { email: string; serverName: string; inviteUrl: string; role: "admin" | "member" }) {
+    return (
+      this.#options.sendTeamInviteEmail?.(input) ??
+      Effect.fail(new RemoteWorkflowError({ cause: new Error(sourceText("error.remote.selfHostedInviteNoEmail")) }))
+    );
+  }
+
+  #assertCurrentOwner(): void {
+    if (this.#options.identityAuthority !== "local") {
+      this.#options.store.assertOwnerAccount(this.#options.getSignedInUser());
+      return;
+    }
+    const owner = this.#options.store.getMember(this.#requiredOwnerMemberId());
+    if (!owner || owner.disabled || owner.role !== "owner")
+      throw new Error(sourceText("error.host.ownerIdentityUnavailable"));
   }
 
   // Native audit callbacks own these background operations; shutdown drains them.
@@ -1670,6 +1702,11 @@ export class HostService extends EventEmitter<HostEvents> {
   }
 
   channelActor(): { id: string; name: string } {
+    if (this.#options.identityAuthority === "local") {
+      const id = this.#currentAgentReaderId();
+      const member = this.#options.store.getMember(id);
+      return { id, name: member?.name || member?.username || "You" };
+    }
     let user: CentralAuthUser;
     try {
       user = this.#options.getSignedInUser();
@@ -1723,6 +1760,10 @@ export class HostService extends EventEmitter<HostEvents> {
    * members of a team they host later.
    */
   conversationSender(): ConversationMessageSender | undefined {
+    if (this.#options.identityAuthority === "local") {
+      const actor = this.channelActor();
+      return conversationMessageSender(actor.id, actor.name);
+    }
     let user: CentralAuthUser;
     try {
       user = this.#options.getSignedInUser();
@@ -1733,6 +1774,11 @@ export class HostService extends EventEmitter<HostEvents> {
   }
 
   #currentAgentReaderId(): string {
+    if (this.#options.identityAuthority === "local") {
+      const ownerId = this.#requiredOwnerMemberId();
+      this.#options.channels?.store.adoptReads(SIGNED_OUT_CHANNEL_MEMBER_ID, ownerId);
+      return ownerId;
+    }
     const accountReaderId = `local-user:${this.#options.getSignedInUser().id}`;
     const memberId = this.#findCurrentMemberId();
     // Channel reads are keyed by the reader id this method answers, so they adopt with it.
@@ -1747,6 +1793,7 @@ export class HostService extends EventEmitter<HostEvents> {
   }
 
   #findCurrentMemberId(): string | null {
+    if (this.#options.identityAuthority === "local") return this.#options.store.getOwnerMemberId();
     try {
       const email = this.#options.getSignedInUser().email.trim().toLowerCase();
       const member = this.#options.store

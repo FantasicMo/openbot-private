@@ -1,3 +1,4 @@
+import { isPrivateBuild } from "@/features/private-access/private-build";
 import { expoGoOnAndroid } from "@/shared/lib/expo-go";
 
 import type { NotificationTarget } from "./push-notifications-native.types";
@@ -9,7 +10,8 @@ type UseNotificationTaps = (open: (target: NotificationTarget) => void, openChat
  * So `notification-taps.native.ts` loads only on iOS and in a build of the app.
  */
 function load(): { installNotificationHandler: () => void; useNotificationTaps: UseNotificationTaps } {
-  if (expoGoOnAndroid()) return { installNotificationHandler: () => undefined, useNotificationTaps: () => undefined };
+  if (isPrivateBuild || expoGoOnAndroid())
+    return { installNotificationHandler: () => undefined, useNotificationTaps: () => undefined };
   const taps: typeof import("./notification-taps.native") = require("./notification-taps.native");
   return taps;
 }

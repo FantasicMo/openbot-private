@@ -14,6 +14,7 @@ import { useChannels } from "../channels/channels-context";
 import { useConversation } from "../conversation/conversation-context";
 import { useDirectMessages } from "../conversation/direct-messages-context";
 import { useSetup } from "../onboarding/onboarding-context";
+import { PRIVATE_BUILD } from "../private-access/private-build";
 import { useSidebar } from "../sidebar/sidebar-context";
 import { usePresence } from "../team/team-context";
 import { serverSupportsCapability } from "./server-capabilities";
@@ -251,7 +252,7 @@ const ServerScope = createSimpleContext({
       const handleGlobalSearchShortcut = (event: KeyboardEvent) => {
         if (
           !isGlobalSearchShortcut(event) ||
-          centralAuth().status !== "signed_in" ||
+          (!PRIVATE_BUILD && centralAuth().status !== "signed_in") ||
           setupState()?.completed !== true
         ) {
           return;

@@ -12,6 +12,7 @@ import { Effect } from "effect";
 import * as Application from "expo-application";
 import { randomUUID } from "expo-crypto";
 import { Alert, type AlertButton, Platform } from "react-native";
+import { isPrivateBuild } from "@/features/private-access/private-build";
 import { currentText } from "@/shared/lib/text";
 
 const storage: ReportStorage = {
@@ -39,6 +40,7 @@ const storage: ReportStorage = {
 
 let reports: ReportQueue | undefined;
 export function mobileReportQueue(): ReportQueue | undefined {
+  if (isPrivateBuild) return undefined;
   if (reports) return reports;
   const clientId = process.env.EXPO_PUBLIC_OPENPANEL_CLIENT_ID;
   const clientSecret = process.env.EXPO_PUBLIC_OPENPANEL_CLIENT_SECRET;

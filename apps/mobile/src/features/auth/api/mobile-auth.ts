@@ -16,6 +16,8 @@ import * as Crypto from "expo-crypto";
 import * as Device from "expo-device";
 import * as SecureStore from "expo-secure-store";
 import { z } from "zod";
+import { isPrivateBuild } from "@/features/private-access/private-build";
+import { PrivateMobileError } from "@/features/private-access/private-contracts";
 import { isAndroid, isIOS } from "@/shared/lib/platform";
 import { currentText } from "@/shared/lib/text";
 import * as LockedKeychain from "../../../shared/lib/locked-keychain";
@@ -627,6 +629,7 @@ async function withMobileAuthRequestTimeout<T>(
   signal?: AbortSignal,
   timeoutMs = MOBILE_AUTH_REQUEST_TIMEOUT_MS,
 ): Promise<T> {
+  if (isPrivateBuild) throw new PrivateMobileError("unsupported");
   const controller = new AbortController();
   const abort = () => controller.abort();
   signal?.addEventListener("abort", abort, { once: true });

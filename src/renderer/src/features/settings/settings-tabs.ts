@@ -13,6 +13,7 @@ import {
   Smartphone,
   UserRound,
 } from "@openbot/ui";
+import { PRIVATE_BUILD } from "../private-access/private-build";
 
 export type SettingsTab =
   | "general"
@@ -68,7 +69,9 @@ export const navItems: ReadonlyArray<SettingsNavItem> = [
       { titleKey: "settings.keepAwake.title", descriptionKey: "settings.keepAwake.description" },
       { titleKey: "settings.keepAwakeOnBattery.title", descriptionKey: "settings.keepAwakeOnBattery.description" },
       { titleKey: "settings.restoreWorkspace.title", descriptionKey: "settings.restoreWorkspace.description" },
-      { titleKey: "settings.analytics.title", descriptionKey: "settings.analytics.description" },
+      ...(PRIVATE_BUILD
+        ? []
+        : [{ titleKey: "settings.analytics.title", descriptionKey: "settings.analytics.description" } as const]),
     ],
   },
   {
@@ -153,21 +156,27 @@ export const navItems: ReadonlyArray<SettingsNavItem> = [
   },
   {
     value: "mobile-connect",
-    titleKey: "settings.tab.mobileConnect.title",
-    descriptionKey: "settings.tab.mobileConnect.description",
+    titleKey: PRIVATE_BUILD ? "privateAccess.title" : "settings.tab.mobileConnect.title",
+    descriptionKey: PRIVATE_BUILD ? "privateAccess.description" : "settings.tab.mobileConnect.description",
     icon: Smartphone,
-    rows: [
-      {
-        titleKey: "settings.mobileConnect.phones.title",
-        descriptionKey: "settings.mobileConnect.phones.description",
-      },
-      { titleKey: "settings.mobileConnect.phones.add", descriptionKey: "settings.mobileConnect.add.question" },
-      { titleKey: "settings.mobileConnect.link.title", descriptionKey: "settings.mobileConnect.link.cardHint" },
-      {
-        titleKey: "settings.mobileConnect.route.title",
-        descriptionKey: "settings.mobileConnect.route.description",
-      },
-    ],
+    rows: PRIVATE_BUILD
+      ? [
+          { titleKey: "privateAccess.address" },
+          { titleKey: "privateAccess.createPairing" },
+          { titleKey: "privateAccess.devices" },
+        ]
+      : [
+          {
+            titleKey: "settings.mobileConnect.phones.title",
+            descriptionKey: "settings.mobileConnect.phones.description",
+          },
+          { titleKey: "settings.mobileConnect.phones.add", descriptionKey: "settings.mobileConnect.add.question" },
+          { titleKey: "settings.mobileConnect.link.title", descriptionKey: "settings.mobileConnect.link.cardHint" },
+          {
+            titleKey: "settings.mobileConnect.route.title",
+            descriptionKey: "settings.mobileConnect.route.description",
+          },
+        ],
   },
   {
     value: "updates",
@@ -203,6 +212,7 @@ export function navItem(tab: SettingsTab): SettingsNavItem {
  * from this panel.
  */
 export function settingsTabShown(tab: SettingsTab, dynamicIslandShown: boolean): boolean {
+  if (PRIVATE_BUILD && (tab === "profile" || tab === "billing" || tab === "updates")) return false;
   if (tab === "hosted-servers") return false;
   return tab !== "dynamic-island" || dynamicIslandShown;
 }

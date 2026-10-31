@@ -26,6 +26,7 @@ import { useAgents } from "../agents/agents-context";
 import { useChannels } from "../channels/channels-context";
 import { useConversation } from "../conversation/conversation-context";
 import { useDirectMessages } from "../conversation/direct-messages-context";
+import { PRIVATE_BUILD } from "../private-access/private-build";
 import { useServerActions } from "../servers/server-actions";
 import { serverRoleCanAdminister } from "../servers/server-capabilities";
 import { useServerSettings } from "../servers/server-settings";
@@ -373,7 +374,7 @@ export function WorkspaceSidebar(props: { peopleEnabled: boolean }) {
               />
             )}
           </Show>
-          <Show when={!platform.landingPreview && !footerCard() && !mobileAppDismissed()}>
+          <Show when={!PRIVATE_BUILD && !platform.landingPreview && !footerCard() && !mobileAppDismissed()}>
             <SidebarMobileAppCard
               onOpenInstall={() => openAppSettings(null, "mobile-connect")}
               onDismiss={() => {

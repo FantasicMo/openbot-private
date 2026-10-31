@@ -20,6 +20,8 @@ import { installAppLock } from "@/features/app-lock/model/app-lock";
 import { DevelopmentConnectLinkHandler } from "@/features/auth/components/development-connect-link-handler";
 import { MobileSessionProvider, useMobileSession } from "@/features/auth/context/mobile-session-context";
 import { loadOnboardingProgress } from "@/features/onboarding/model/onboarding-progress";
+import { usePrivateAccess } from "@/features/private-access/private-access-context";
+import { isPrivateBuild } from "@/features/private-access/private-build";
 import { installNotificationHandler } from "@/features/push-notifications/use-notification-taps";
 import { installQuickActions, resetQuickActions } from "@/features/quick-actions/quick-actions-native";
 import { loadAppLanguage } from "@/features/settings/model/app-language";
@@ -70,6 +72,10 @@ const SLOW_LAUNCH_MS = 700;
 function RootNavigator() {
   const { t } = useText();
   const { loading, session } = useMobileSession();
+  const privateAccess = usePrivateAccess();
+  const signedIn =
+    Boolean(session) ||
+    Boolean(privateAccess && !loading && !privateAccess.error && privateAccess.store.state().hosts.length);
   const pathname = usePathname();
   const { setLoadingLabel, isLoaderPresent } = useAppLoadingOverlay();
   const appearanceReady = useAppearance((state) => state.ready);
@@ -111,16 +117,16 @@ function RootNavigator() {
   // A quick action stays on the app icon after the session ends, such as one that another device revoked.
   // The share extension keeps its copy of the session and the share sheet its agents, so both go too.
   useEffect(() => {
-    if (loading || session) return;
+    if (loading || signedIn) return;
     resetQuickActions();
     resetShareExtension();
-  }, [loading, session]);
+  }, [loading, signedIn]);
 
   useLayoutEffect(() => {
-    if (loading || !session || (pathname !== "/" && pathname !== "/connected")) setLoadingLabel(null);
+    if (loading || !signedIn || (pathname !== "/" && pathname !== "/connected")) setLoadingLabel(null);
     // The splash covers account loading on its own. Keep the loader down until ConnectedScreen
     // reports the workspace state.
-  }, [loading, pathname, session, setLoadingLabel]);
+  }, [loading, pathname, signedIn, setLoadingLabel]);
 
   return (
     <SplashContentReadyContext.Provider value={reportContentReady}>
@@ -132,7 +138,10 @@ function RootNavigator() {
           importantForAccessibility={blocked ? "no-hide-descendants" : "auto"}
         >
           {!loading && preferencesReady ? (
-            <View className="flex-1" onLayout={session || pathname !== "/" ? reportContentReady : undefined}>
+            <View
+              className="flex-1"
+              onLayout={signedIn || isPrivateBuild || pathname !== "/" ? reportContentReady : undefined}
+            >
               <Stack
                 screenOptions={{
                   headerBackButtonDisplayMode: "minimal",
@@ -143,12 +152,14 @@ function RootNavigator() {
               >
                 {/* A blocked route redirects. Without `redirectTo`, Expo Router uses the first open route, the
                     `(app)` group, whose URL is `/`, and `/` is the blocked sign-in screen. */}
-                <Stack.Protected guard={!session} redirectTo="/connected">
+                <Stack.Protected guard={!signedIn} redirectTo="/connected">
                   {/* Signing out goes back, so it fades like signing in instead of sliding forward. */}
                   <Stack.Screen
                     name="index"
                     options={{ animation: "fade", animationDuration: SESSION_FADE_MS, headerShown: false }}
                   />
+                </Stack.Protected>
+                <Stack.Protected guard={!signedIn || isPrivateBuild} redirectTo="/connected">
                   <Stack.Screen
                     name="scan-qr-code"
                     options={{
@@ -157,7 +168,7 @@ function RootNavigator() {
                     }}
                   />
                 </Stack.Protected>
-                <Stack.Protected guard={Boolean(session)} redirectTo="/">
+                <Stack.Protected guard={signedIn} redirectTo="/">
                   <Stack.Screen
                     name="(app)"
                     options={{
@@ -234,8 +245,8 @@ export default function RootLayout() {
               <StatusBar style={colorScheme === "dark" ? "light" : "dark"} />
               <BloubStageProvider>
                 <MobileSessionProvider>
-                  <MobileAnalyticsLifecycle />
-                  {__DEV__ ? <DevelopmentConnectLinkHandler /> : null}
+                  {isPrivateBuild ? null : <MobileAnalyticsLifecycle />}
+                  {__DEV__ && !isPrivateBuild ? <DevelopmentConnectLinkHandler /> : null}
                   <AppLoadingOverlayProvider>
                     <RootNavigator />
                   </AppLoadingOverlayProvider>

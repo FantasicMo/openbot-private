@@ -1,0 +1,147 @@
+name: Build private Windows candidate
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: private-windows-candidate-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  verify:
+    uses: ./.github/workflows/private-verify.yml
+
+  candidate:
+    name: Build, install and launch private Windows x64
+    needs: verify
+    runs-on: windows-2025
+    timeout-minutes: 60
+    env:
+      CI: "1"
+      OPENBOT_PRIVATE_BUILD: "1"
+      CSC_IDENTITY_AUTO_DISCOVERY: "false"
+    steps:
+      - name: Check out candidate source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Node
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: "24.22.2"
+
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+        with:
+          bun-version: "1.4.2"
+
+      - name: Install locked dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Install and verify pinned remote desktop runtime
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          bun scripts/install-remote-desktop-runtime.ts win32 x64
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          bun run verify:remote-desktop-runtime --windows
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Prepare packaged voice and computer controls
+        run: |
+          bun run voice:prepare-runtime
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          bun scripts/install-cua-driver.ts win32 x64
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Build private application and verify preload bundle
+        run: |
+          bun run build
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          bun run verify:preload
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Package private unsigned installer
+        run: bunx --no-install electron-builder --config electron-builder.private.yml --win nsis --x64 --publish never
+
+      - name: Install and drive the real private application
+        run: |
+          # Bun and Electron must not pass PowerShell 7 module paths to Windows PowerShell 5.
+          $env:PSModulePath = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\Modules'
+          $installers = @(Get-ChildItem -LiteralPath dist-private -Filter 'OpenBot-Private-*-x64.exe' -File)
+          if ($installers.Count -ne 1) { throw 'Expected exactly one private Windows installer.' }
+          bun scripts/private-windows-installer-e2e.ts $installers[0].FullName
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Require unchanged locked dependencies
+        run: git diff --exit-code -- bun.lock
+
+      - name: Record candidate provenance and checksums
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $candidateDirectory = Join-Path $env:RUNNER_TEMP 'private-windows-candidate'
+          New-Item -ItemType Directory -Path $candidateDirectory -Force | Out-Null
+          $installer = @(Get-ChildItem -LiteralPath dist-private -Filter 'OpenBot-Private-*-x64.exe' -File)
+          if ($installer.Count -ne 1) { throw 'Expected exactly one accepted installer.' }
+          $smokePath = '.openbot-build/private-windows-installer-e2e/report.json'
+          $smoke = Get-Content -LiteralPath $smokePath -Raw | ConvertFrom-Json
+          if ($smoke.passed -ne $true) { throw 'The installed application did not pass smoke verification.' }
+          Copy-Item -LiteralPath $installer[0].FullName -Destination $candidateDirectory
+          Copy-Item -LiteralPath $smokePath -Destination (Join-Path $candidateDirectory 'installer-report.json')
+          $assets = @(Get-ChildItem -LiteralPath $candidateDirectory -File | Sort-Object Name | ForEach-Object {
+            [ordered]@{ path = $_.Name; sha256 = (Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant(); bytes = $_.Length }
+          })
+          $metadata = [ordered]@{
+            format = 1
+            repository = $env:GITHUB_REPOSITORY
+            sourceCommit = (git rev-parse HEAD).Trim()
+            ref = $env:GITHUB_REF
+            lockSha256 = (Get-FileHash -LiteralPath bun.lock -Algorithm SHA256).Hash.ToLowerInvariant()
+            workflow = $env:GITHUB_WORKFLOW
+            runId = $env:GITHUB_RUN_ID
+            runAttempt = $env:GITHUB_RUN_ATTEMPT
+            runUrl = "$env:GITHUB_SERVER_URL/$env:GITHUB_REPOSITORY/actions/runs/$env:GITHUB_RUN_ID/attempts/$env:GITHUB_RUN_ATTEMPT"
+            nodeVersion = (node --version).Trim()
+            bunVersion = (bun --version).Trim()
+            privateBuild = $true
+            signature = 'unsigned-internal-candidate'
+            serviceVerification = 'passed'
+            installerSmoke = 'passed'
+            artifacts = $assets
+          }
+          if ($metadata.sourceCommit -ne $env:GITHUB_SHA) { throw 'The checked-out source does not match the workflow commit.' }
+          $metadata | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath (Join-Path $candidateDirectory 'candidate.json') -Encoding utf8NoBOM
+          $checksums = Get-ChildItem -LiteralPath $candidateDirectory -File | Sort-Object Name | ForEach-Object {
+            "{0}  {1}" -f (Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant(), $_.Name
+          }
+          $checksums | Set-Content -LiteralPath (Join-Path $candidateDirectory 'SHA256SUMS.txt') -Encoding utf8NoBOM
+          "CANDIDATE_DIRECTORY=$candidateDirectory" >> $env:GITHUB_ENV
+          "Windows candidate commit: $($metadata.sourceCommit)" >> $env:GITHUB_STEP_SUMMARY
+          "Lock SHA-256: $($metadata.lockSha256)" >> $env:GITHUB_STEP_SUMMARY
+          'Download the candidate artifact from this run. Check SHA256SUMS.txt before installation.' >> $env:GITHUB_STEP_SUMMARY
+          'This run does not publish a Release. Keep these exact accepted bytes for later publication.' >> $env:GITHUB_STEP_SUMMARY
+
+      - name: Upload accepted installer and provenance
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: private-windows-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ env.CANDIDATE_DIRECTORY }}
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Upload redacted installation evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: private-windows-smoke-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            .openbot-build/private-windows-installer-e2e/report.json
+            .openbot-build/private-windows-installer-e2e/installed-app.png
+          include-hidden-files: true
+          if-no-files-found: warn
+          retention-days: 30

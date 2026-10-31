@@ -197,9 +197,11 @@ const developmentTestClientEnabled = !app.isPackaged && process.env.OPENBOT_DEV_
 // Before any child process starts: agents must not run as part of a Claude Code session that started OpenBot.
 removeClaudeCodeSessionEnvironment(process.env);
 // Before any child process starts: this removes the single-use claim from the environment they inherit.
-const hostedServer = takeHostedServerEnvironment(process.env, app.isPackaged, process.platform);
+const hostedServerEnvironment = takeHostedServerEnvironment(process.env, app.isPackaged, process.platform);
+const hostedServer = PRIVATE_BUILD ? null : hostedServerEnvironment;
 const hostingDeveloperKey = takeHostingDeveloperKey(process.env, app.isPackaged);
-const serverMode = takeServerModeEnvironment(process.env, app.isPackaged, process.platform);
+const serverModeEnvironment = takeServerModeEnvironment(process.env, app.isPackaged, process.platform);
+const serverMode = PRIVATE_BUILD ? null : serverModeEnvironment;
 // Always taken, so the owner password leaves the environment also when the flag is refused.
 const localServerChildEnvironment = takeLocalServerChildEnvironment(process.env, commandLineUserDataDirectory);
 const localServerChild = serverMode || hostedServer ? null : localServerChildEnvironment;
@@ -226,6 +228,14 @@ if (configureLinuxPasswordStore())
   logger.info(`No Chromium keyring for "${process.env.XDG_CURRENT_DESKTOP ?? ""}"; using gnome-libsecret.`);
 if (commandLineUserDataDirectory) {
   app.setPath("userData", resolve(commandLineUserDataDirectory));
+} else if (PRIVATE_BUILD) {
+  const name = app.isPackaged
+    ? PRIVATE_APP_NAME
+    : developmentUserDataName(
+        developmentProfile ?? "app",
+        readDevelopmentInstanceId(process.env.OPENBOT_DEV_INSTANCE_ID),
+      ).replace(/^OpenBot/u, PRIVATE_APP_NAME);
+  app.setPath("userData", join(app.getPath("appData"), name));
 } else if (!app.isPackaged) {
   app.setPath(
     "userData",
@@ -238,9 +248,10 @@ if (commandLineUserDataDirectory) {
     ),
   );
 }
-app.setName("OpenBot");
+app.setName(PRIVATE_BUILD ? PRIVATE_APP_NAME : "OpenBot");
+if (PRIVATE_BUILD) app.setPath("sessionData", app.getPath("userData"));
 app.enableSandbox();
-if (process.platform === "win32") app.setAppUserModelId("app.openbot.desktop");
+if (process.platform === "win32") app.setAppUserModelId(PRIVATE_BUILD ? PRIVATE_APP_ID : "app.openbot.desktop");
 const hasSingleInstanceLock = app.requestSingleInstanceLock();
 // A second launch exits at once and must not write into the files of the instance that runs.
 if (hasSingleInstanceLock) {
@@ -556,6 +567,7 @@ function attachWindowsSessionEndHandlers(window: BrowserWindow): void {
 }
 
 function registerIpcHandlers({
+  privateAccess,
   service,
   signInRelayClient,
   relayedMessagingInstalls,
@@ -650,6 +662,10 @@ function registerIpcHandlers({
   const getDialogParent = () => windows.getChatWindows().find((window) => window.isFocused()) ?? windowHolder.current;
 
   registerIpcGroups({
+    ...privateAccessIpcHandlers({
+      privateAccess,
+      getMainRendererId: () => windows.getMainWindow()?.webContents.id ?? null,
+    }),
     ...appIpcHandlers({
       service,
       mailbox,
@@ -877,6 +893,7 @@ async function presentApplication(): Promise<void> {
   // A macOS development build does not register either: macOS ignores the path and arguments and
   // names the `com.github.Electron` bundle, so the link took `openbot://` from an installed
   // OpenBot and opened some worktree's bare Electron.app. `bun run dev:slack` has a loopback return.
+  if (PRIVATE_BUILD) return;
   await Effect.runPromise(
     installLinuxDesktopEntry({ platform: process.platform, environment: process.env, iconPath: appIconPath }),
   );
@@ -896,7 +913,7 @@ function centralAuthPrincipalId(state: CentralAuthState): string | null {
 
 function forwardCentralAuth(state: CentralAuthState): void {
   // A local server has no account: its owner is a password member that a sign-out must not unbind.
-  if (localServerChild) return;
+  if (localServerChild || PRIVATE_BUILD) return;
   if (state.status === "signed_in") {
     if (activeAnalyticsPrincipalId && activeAnalyticsPrincipalId !== state.user.id) services?.analytics.clear();
     activeAnalyticsPrincipalId = state.user.id;
@@ -1282,6 +1299,9 @@ if (!hasSingleInstanceLock) {
         }
       });
       host.on("changed", onHostChanged);
+      built.privateAccess?.on("changed", (status) => {
+        sendToRenderer(windows.getMainWindow(), IPC_ENDPOINTS.privateAccess.changed, status);
+      });
       host.on("presence", (snapshot) => forwardTeamPresence("local", snapshot));
       host.on("directMessage", (event) => forwardDirectMessage("local", event));
       host.on("directTyping", (event) => forwardDirectTyping("local", event));
@@ -1306,7 +1326,8 @@ if (!hasSingleInstanceLock) {
         built.centralAuthInitialization.pipe(
           Effect.flatMap(() =>
             Effect.sync(() => {
-              if (built.centralAuth.getState().status === "signed_in") remoteServers.connectActiveServer();
+              if (PRIVATE_BUILD || built.centralAuth.getState().status === "signed_in")
+                remoteServers.connectActiveServer();
             }),
           ),
           Effect.catch(() => Effect.void),
@@ -1314,7 +1335,7 @@ if (!hasSingleInstanceLock) {
       ).catch((error) => logger.warn("Unable to start the selected server's connection:", toLogValue(error)));
       updater.on("status", forwardUpdateStatus);
       built.requestedUpdate.on("preference", forwardUpdatePreference);
-      updater.start();
+      if (!PRIVATE_BUILD) updater.start();
       // Each tenant quits only itself. The host verifies process exit independently.
       built.hostUpdateCoordinator.setStopHandler(async () => {
         await prepareForUpdateInstall();
@@ -1430,12 +1451,13 @@ if (!hasSingleInstanceLock) {
         keepAwake.dispose();
       });
       const teamIdentity = teamStore.getIdentity();
-      if (built.serverMode) {
+      if (!PRIVATE_BUILD && built.serverMode) {
         const serverModeControl = built.serverMode;
         void runCauseEffect(
           built.centralAuthInitialization.pipe(Effect.flatMap(() => serverModeControl.publish())),
         ).catch((error) => logger.error("Unable to publish this server:", toLogValue(error)));
       } else if (
+        !PRIVATE_BUILD &&
         shouldAutoStartHost({
           configured: Boolean(teamIdentity),
           enabledOnLaunch: teamIdentity?.enabledOnLaunch ?? false,
@@ -1607,3 +1629,6 @@ async function prepareForShutdown(): Promise<void> {
   macHapticFeedback.destroy();
   await teardown.runAll();
 }
+
+import { privateAccessIpcHandlers } from "./ipc/private-access-handlers";
+import { PRIVATE_APP_ID, PRIVATE_APP_NAME, PRIVATE_BUILD } from "./private-access-build";

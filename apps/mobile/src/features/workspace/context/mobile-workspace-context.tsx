@@ -53,14 +53,12 @@ import {
   type RemoteConnectionFailure,
   type RemoteConnectionStage,
   type RemoteRecoveryStatus,
-  RemoteTeamDirectoryClient,
   type RemoteTeamHost,
   type RemoteWorkspacePreferences,
   readAgentAnalytics,
   remoteRecoveryMessage,
   runTeamEffect,
 } from "@openbot/team-client";
-import { verifyEd25519Base64Url } from "@openbot/team-client/ed25519";
 import { createFocusUsePing } from "@openbot/team-client/focus-use";
 import { createHostedServerWake, WAKE_RECONNECT_DELAY_MS } from "@openbot/team-client/hosted-server-wake";
 import type { RemoteFileUpload } from "@openbot/team-client/remote-peer";
@@ -83,10 +81,15 @@ import { View } from "react-native";
 import { showFailureAlert } from "@/features/analytics/failure-reports";
 import { mobileAnalytics } from "@/features/analytics/mobile-analytics";
 import { trackWorkspaceActions } from "@/features/analytics/workspace-actions";
-import { useMobileSession } from "@/features/auth/context/mobile-session-context";
 import { decodeMobileBrowserTabs } from "@/features/browser/model/browser-tabs";
 import { MobileChannelStore } from "@/features/channels/model/channel-store";
 import { useLiveActivity } from "@/features/live-activity/use-live-activity";
+import {
+  type MobileWorkspaceAccess,
+  useMobileWorkspaceAccess,
+} from "@/features/private-access/mobile-workspace-access";
+import { usePrivateAccess } from "@/features/private-access/private-access-context";
+import { isPrivateBuild } from "@/features/private-access/private-build";
 import { usePushNotifications } from "@/features/push-notifications/use-push-notifications";
 import { useSyncedNotificationLevelsLoader } from "@/features/push-notifications/use-synced-notification-levels";
 import { QuickActionsSync } from "@/features/quick-actions/quick-actions-sync";
@@ -155,7 +158,6 @@ import {
 import { withoutTaskTurns } from "@/features/workspace/model/task-cache";
 import { applyBrowserEvent, syncEventQueries } from "@/features/workspace/model/team-events";
 import { runTeamRequest } from "@/features/workspace/model/team-request";
-import { trustedHostKeys } from "@/features/workspace/model/trusted-host-keys";
 import { appendTurnStepLine, latestThoughtId } from "@/features/workspace/model/turn-step-lines";
 import {
   decodeAgent,
@@ -250,29 +252,24 @@ function withoutKeys<T>(record: Record<string, T>, keys: ReadonlySet<string>): R
 }
 
 export function MobileWorkspaceProvider({ children }: PropsWithChildren) {
-  const { session, sessionScope } = useMobileSession();
+  const access = useMobileWorkspaceAccess();
+  if (!access) throw new Error("MobileWorkspaceProvider requires workspace access.");
+  return <ConnectedMobileWorkspaceProvider access={access}>{children}</ConnectedMobileWorkspaceProvider>;
+}
+
+function ConnectedMobileWorkspaceProvider({ children, access }: PropsWithChildren<{ access: MobileWorkspaceAccess }>) {
+  const privateAccess = usePrivateAccess();
+  const session = access.officialSession;
   const queryClient = useQueryClient();
   useEffect(() => () => queryClient.removeQueries({ queryKey: queryKeys.chatQueue() }), [queryClient]);
   const presenceSignatures = useRef(new Map<string, string>());
   const [memberCountByServer, setMemberCountByServer] = useState<Readonly<Record<string, number>>>({});
-  if (!session) throw new Error("MobileWorkspaceProvider requires a signed-in mobile session.");
   const queryScope = useMemo<QueryScope>(
-    () => [session.apiUrl, session.user.id, sessionScope],
-    [session.apiUrl, session.user.id, sessionScope],
+    () => [access.namespace, access.identityId, access.scope],
+    [access.namespace, access.identityId, access.scope],
   );
 
-  const directory = useMemo(
-    () =>
-      new RemoteTeamDirectoryClient({
-        apiUrl: session.apiUrl,
-        token: session.sessionToken,
-        fetch,
-        hostKeys: trustedHostKeys(session.apiUrl, session.user.id),
-        pairedHost: session.host,
-        verifyHostKeySignature: verifyEd25519Base64Url,
-      }),
-    [session.apiUrl, session.sessionToken, session.user.id, session.host],
-  );
+  const directory = access.directory;
   const connections = useRef(new Map<string, ServerConnectionHandle>());
   const [connectionWaits] = useState(() => new ConnectionWaits());
   const loadGeneration = useRef(0);
@@ -303,9 +300,9 @@ export function MobileWorkspaceProvider({ children }: PropsWithChildren) {
   const readRefresh = useMemo(() => createRemoteReadRefresh(), []);
   const serverCapabilities = useRef(new Map<string, readonly string[]>());
   const { serverOrder, defaultServerId, orderedServers, sortByPreference, reorderServers } = useServerOrder(
-    session.apiUrl,
-    session.user.id,
-    session.host?.hostId,
+    access.namespace,
+    access.identityId,
+    access.pairedHostId,
     servers,
   );
   // The app opens on the first server of the list. The directory corrects a saved server that is gone.
@@ -324,12 +321,12 @@ export function MobileWorkspaceProvider({ children }: PropsWithChildren) {
   const [liveState] = useState(() => new LiveWorkspaceStore());
   const preferenceStore = useMemo(
     () =>
-      createWorkspacePreferences(session.apiUrl, session.user.id, {
+      createWorkspacePreferences(access.namespace, access.identityId, {
         // The keychain that a locked phone can read (`locked-keychain.ts`), with the session.
         get: (key) => LockedKeychain.getItem(key),
         set: (key, value) => LockedKeychain.setItem(key, value),
       }),
-    [session.apiUrl, session.user.id],
+    [access.namespace, access.identityId],
   );
   const [preferences, setPreferences] = useState<Record<string, RemoteWorkspacePreferences>>({});
   const preferencesRef = useRef(preferences);
@@ -440,7 +437,7 @@ export function MobileWorkspaceProvider({ children }: PropsWithChildren) {
       setServers((current) => {
         const previousServers = new Map(current.map((server) => [server.id, server]));
         return hosts.map((host) =>
-          serverFromHost(host, serverKind(host.hostId, session.host?.hostId), previousServers.get(host.hostId)),
+          serverFromHost(host, serverKind(host.hostId, access.pairedHostId), previousServers.get(host.hostId)),
         );
       });
       setActiveServerId((current) =>
@@ -449,7 +446,7 @@ export function MobileWorkspaceProvider({ children }: PropsWithChildren) {
           : (sortByPreference(hosts.map((host) => ({ id: host.hostId })))[0]?.id ?? null),
       );
     },
-    [dropServerState, session.host?.hostId, sortByPreference],
+    [dropServerState, access.pairedHostId, sortByPreference],
   );
 
   const directoryRefresh = useMemo(
@@ -485,6 +482,11 @@ export function MobileWorkspaceProvider({ children }: PropsWithChildren) {
     return runTeamEffect(directoryRefresh.refresh(true));
   }, [directoryRefresh]);
 
+  const privateRevision = privateAccess?.revision;
+  useEffect(() => {
+    if (privateRevision !== undefined) void refreshMemberships().catch(() => undefined);
+  }, [privateRevision, refreshMemberships]);
+
   useEffect(() => {
     return () => {
       directoryGeneration.current += 1;
@@ -502,11 +504,12 @@ export function MobileWorkspaceProvider({ children }: PropsWithChildren) {
       serverId = activeServerIdRef.current,
       upload?: RemoteFileUpload,
       onUploadProgress?: (fraction: number) => void,
+      transferId?: string,
     ): Promise<T> => {
       if (serverId) await connectionWaits.whenConnected(serverId);
       const client = serverId ? connections.current.get(serverId)?.client : null;
       if (!client) throw new Error(currentText().t("mobile.workspace.error.transportNotReady"));
-      return client.request(method, path, decode, body, upload, onUploadProgress);
+      return client.request(method, path, decode, body, upload, onUploadProgress, transferId);
     },
     [connectionWaits],
   );
@@ -536,7 +539,7 @@ export function MobileWorkspaceProvider({ children }: PropsWithChildren) {
     activeServerId,
     agents,
     liveState,
-    foreground,
+    foreground: foreground && !isPrivateBuild,
     post: postLiveActivityAction,
     loadAgentAvatar,
     supportsPush: supportsLiveActivityPush,
@@ -544,6 +547,7 @@ export function MobileWorkspaceProvider({ children }: PropsWithChildren) {
   // An iPhone and an Android phone register through capabilities of their own.
   const supportsPushNotifications = useCallback(
     (serverId: string) =>
+      !isPrivateBuild &&
       hasCapability(
         serverCapabilities.current,
         serverId,
@@ -554,15 +558,15 @@ export function MobileWorkspaceProvider({ children }: PropsWithChildren) {
   usePushNotifications({
     servers,
     serversReady: serverDirectoryState === "ready",
-    foreground,
+    foreground: foreground && !isPrivateBuild,
     post: postLiveActivityAction,
     supportsPush: supportsPushNotifications,
   });
   /** The shared Team API requests, sent to one server. */
   const teamApi = useCallback(
-    (serverId?: string, onUploadProgress?: (fraction: number) => void): TeamApiRequest =>
+    (serverId?: string, onUploadProgress?: (fraction: number) => void, transferId?: string): TeamApiRequest =>
       (method, path, decode, body, upload) =>
-        request(method, path, decode, body, serverId, upload, onUploadProgress),
+        request(method, path, decode, body, serverId, upload, onUploadProgress, transferId),
     [request],
   );
 
@@ -880,15 +884,16 @@ export function MobileWorkspaceProvider({ children }: PropsWithChildren) {
   const wakeHostedServer = useMemo(
     () =>
       createHostedServerWake((hostId) =>
-        Effect.tryPromise((signal) =>
-          fetch(new URL(`/v2/hosting/servers/${encodeURIComponent(hostId)}/wake`, session.apiUrl).toString(), {
+        Effect.tryPromise((signal) => {
+          if (!session) throw new Error("Hosted servers are unavailable in private mode.");
+          return fetch(new URL(`/v2/hosting/servers/${encodeURIComponent(hostId)}/wake`, session.apiUrl).toString(), {
             method: "POST",
             headers: { Authorization: `Bearer ${session.sessionToken}` },
             signal,
-          }),
-        ),
+          });
+        }),
       ),
-    [session.apiUrl, session.sessionToken],
+    [session],
   );
   const foregroundRef = useRef(foreground);
   foregroundRef.current = foreground;
@@ -926,6 +931,7 @@ export function MobileWorkspaceProvider({ children }: PropsWithChildren) {
   // app in the foreground. It connects again when the account server says that it starts.
   const wakeSelectedServer = useCallback(
     (hostId: string) => {
+      if (isPrivateBuild) return;
       if (!foregroundRef.current || hostId !== activeServerIdRef.current) return;
       void runTeamEffect(wakeHostedServer(hostId)).then((waking) => {
         if (!waking || hostId !== activeServerIdRef.current) return;
@@ -1477,10 +1483,10 @@ export function MobileWorkspaceProvider({ children }: PropsWithChildren) {
       loadConversationAround,
       loadLatestMessages,
       loadOlderMessages,
-      uploadAttachment: async (agentId, input, targetServerId, onProgress) => {
+      uploadAttachment: async (agentId, input, targetServerId, onProgress, transferId) => {
         const serverId = targetServerId ?? agentsRef.current.find((candidate) => candidate.id === agentId)?.serverId;
         if (!serverId) throw new Error(currentText().t("mobile.workspace.error.agentUnavailable"));
-        return runTeamRequest(uploadAttachmentDraft(teamApi(serverId, onProgress), input));
+        return runTeamRequest(uploadAttachmentDraft(teamApi(serverId, onProgress, transferId), input));
       },
       discardAttachment: async (agentId, attachmentId, targetServerId) => {
         const serverId = targetServerId ?? agentsRef.current.find((candidate) => candidate.id === agentId)?.serverId;
@@ -1715,7 +1721,9 @@ export function MobileWorkspaceProvider({ children }: PropsWithChildren) {
     };
     return {
       ...hostRequests.checks,
-      browserViewSupport: browser.browserViewSupport,
+      browserViewSupport: isPrivateBuild
+        ? () => ({ view: false, clipboard: false, contextMenu: false, viewport: false, navigation: false })
+        : browser.browserViewSupport,
       sidebarByServer,
       servers: orderedServers,
       memberCountByServer,
@@ -1815,23 +1823,27 @@ export function MobileWorkspaceProvider({ children }: PropsWithChildren) {
       <RecoveryCountdownContext.Provider value={recoveryCountdowns}>
         <View className="flex-1">
           {children}
-          <QuickActionsSync
-            apiUrl={session.apiUrl}
-            userId={session.user.id}
-            servers={servers}
-            serversReady={serverDirectoryState === "ready"}
-            activeServerId={activeServerId}
-            agents={agents}
-            preferences={visiblePreferences}
-          />
-          <ShareExtensionSync
-            apiUrl={session.apiUrl}
-            userId={session.user.id}
-            sessionToken={session.sessionToken}
-            servers={orderedServers}
-            serversReady={serverDirectoryState === "ready"}
-            agents={agents}
-          />
+          {session ? (
+            <QuickActionsSync
+              apiUrl={session.apiUrl}
+              userId={session.user.id}
+              servers={servers}
+              serversReady={serverDirectoryState === "ready"}
+              activeServerId={activeServerId}
+              agents={agents}
+              preferences={visiblePreferences}
+            />
+          ) : null}
+          {session ? (
+            <ShareExtensionSync
+              apiUrl={session.apiUrl}
+              userId={session.user.id}
+              sessionToken={session.sessionToken}
+              servers={orderedServers}
+              serversReady={serverDirectoryState === "ready"}
+              agents={agents}
+            />
+          ) : null}
           {servers.map((server) => (
             <ServerConnection
               key={server.id}

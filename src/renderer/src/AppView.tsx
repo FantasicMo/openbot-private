@@ -6,6 +6,7 @@ import { createLanguageStep } from "./features/onboarding/language-step";
 import { useSetup } from "./features/onboarding/onboarding-context";
 import { SetupReadError } from "./features/onboarding/SetupReadError";
 import { useSetupProviderProps } from "./features/onboarding/setup-provider-props";
+import { PRIVATE_BUILD } from "./features/private-access/private-build";
 import { useServerScope } from "./features/servers/server-scope";
 import { useServerSelection } from "./features/servers/server-selection";
 import { useSettings } from "./features/settings/settings-context";
@@ -69,7 +70,7 @@ export function AppAccessGate() {
     <>
       <Show when={started()}>
         <Show
-          when={auth.visibleSignedInAccount()}
+          when={PRIVATE_BUILD || auth.visibleSignedInAccount()}
           fallback={
             <Loading fallback={<LoadingScreen />}>
               <Show
@@ -90,14 +91,22 @@ export function AppAccessGate() {
             </Loading>
           }
         >
-          {(account) => (
+          <Show
+            when={!PRIVATE_BUILD || languageStep.done()}
+            fallback={
+              <LanguageStep variant={platform.appInfo()?.variant ?? "production"} onDone={languageStep.complete} />
+            }
+          >
             <Show
               when={setup.setupState()?.completed}
               fallback={
-                <Show when={scope.connection.hasContent} fallback={<WorkspaceShell account={account} />}>
+                <Show
+                  when={scope.connection.hasContent}
+                  fallback={<WorkspaceShell account={auth.visibleSignedInAccount} />}
+                >
                   <Show when={!setup.setupReadFailed()} fallback={<SetupReadError />}>
                     <Show
-                      when={setup.pendingInviteUrl().trim()}
+                      when={!PRIVATE_BUILD && auth.visibleSignedInAccount() && setup.pendingInviteUrl().trim()}
                       fallback={
                         <Loading fallback={<LoadingScreen />}>
                           <FirstRunFlow
@@ -126,7 +135,7 @@ export function AppAccessGate() {
                             setup.setupState() ?? { completed: false, preferredProvider: null, preferredModel: null }
                           }
                           platform={platform.appInfo()?.platform ?? "darwin"}
-                          accountEmail={account().email}
+                          accountEmail={auth.visibleSignedInAccount()?.email ?? ""}
                           inviteUrl={setup.pendingInviteUrl()}
                           onSave={setup.saveSetup}
                           onPreviewInvite={setup.previewInvite}
@@ -139,13 +148,14 @@ export function AppAccessGate() {
                 </Show>
               }
             >
-              <WorkspaceShell account={account} />
+              <WorkspaceShell account={auth.visibleSignedInAccount} />
             </Show>
-          )}
+          </Show>
         </Show>
       </Show>
       <WhatsNewOverlay
         ready={
+          !PRIVATE_BUILD &&
           !platform.chatWindow &&
           !splashShown() &&
           !!auth.visibleSignedInAccount() &&

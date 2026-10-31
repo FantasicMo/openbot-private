@@ -27,7 +27,7 @@ import { useChannels } from "./channels-context";
  * browser tabs come from the desktop contexts. Keyed by the channel id: the view reads its channel
  * once, so another channel opens a new view.
  */
-export function WorkspaceChannelConversation(props: { account: () => CentralAuthUser }) {
+export function WorkspaceChannelConversation(props: { account: () => CentralAuthUser | null }) {
   const channels = useChannels();
   return (
     <Show when={channels.state.selectedId} keyed>
@@ -36,7 +36,7 @@ export function WorkspaceChannelConversation(props: { account: () => CentralAuth
   );
 }
 
-function DesktopChannelConversation(props: { channelId: string; account: () => CentralAuthUser }) {
+function DesktopChannelConversation(props: { channelId: string; account: () => CentralAuthUser | null }) {
   const platform = usePlatform();
   const scope = useServerScope();
   const connectors = useConnectors();
@@ -111,7 +111,7 @@ function DesktopChannelConversation(props: { channelId: string; account: () => C
       browserControlState={browserControlState()}
       server={activeServer()}
       presence={teamPresence()}
-      currentUserEmail={props.account().email}
+      currentUserEmail={props.account()?.email ?? ""}
       isOwnSender={isOwnSender}
       browserEnabled={!platform.landingPreview && activeServerSupportsCapability("browser-control")}
       openLinksInBrowser={generalSettings().externalLinkTarget.kind === "openbot"}

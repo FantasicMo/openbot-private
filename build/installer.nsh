@@ -2,6 +2,10 @@
 ; openbot:// scheme only on macOS and Linux, so the installer writes the Windows key itself.
 ; The application writes the same key at each start (`src/main/index.ts`).
 
+!ifndef OPENBOT_DATA_DIRECTORY
+  !define OPENBOT_DATA_DIRECTORY "OpenBot"
+!endif
+
 ; A chosen folder such as D:\OpenBot inherits Modify rights for "Authenticated Users" from the drive
 ; root, so another account could replace OpenBot.exe. Give access only to this user, SYSTEM and
 ; Administrators, as %LOCALAPPDATA% does, and reset the files to inherit it. This runs before the
@@ -38,10 +42,12 @@
 !macroend
 
 !macro customInstall
+  !ifndef OPENBOT_PRIVATE_INSTALL
   WriteRegStr SHCTX "Software\Classes\openbot" "" "URL:OpenBot invitations"
   WriteRegStr SHCTX "Software\Classes\openbot" "URL Protocol" ""
   WriteRegStr SHCTX "Software\Classes\openbot\DefaultIcon" "" "$appExe,0"
   WriteRegStr SHCTX "Software\Classes\openbot\shell\open\command" "" '"$appExe" "%1"'
+  !endif
   !insertmacro openBotRemoveAppFromDataFolder
 !macroend
 
@@ -62,6 +68,8 @@
   ${if} ${PATH} != ""
     !insertmacro openBotHolds ${PATH} "$PROFILE\OpenBot" ${OUT}
     !insertmacro openBotHolds ${PATH} "$APPDATA\OpenBot" ${OUT}
+    !insertmacro openBotHolds ${PATH} "$PROFILE\OpenBot Private" ${OUT}
+    !insertmacro openBotHolds ${PATH} "$APPDATA\OpenBot Private" ${OUT}
   ${endIf}
   Pop $R9
   Pop $R8
@@ -100,10 +108,10 @@
       ${if} ${FileExists} "$1\${APP_EXECUTABLE_FILENAME}"
         StrCpy $openBotDataFolderInstall $1
       ${endIf}
-    ${elseIf} ${FileExists} "$PROFILE\OpenBot\${APP_EXECUTABLE_FILENAME}"
-      StrCpy $openBotDataFolderInstall "$PROFILE\OpenBot"
-    ${elseIf} ${FileExists} "$APPDATA\OpenBot\${APP_EXECUTABLE_FILENAME}"
-      StrCpy $openBotDataFolderInstall "$APPDATA\OpenBot"
+    ${elseIf} ${FileExists} "$PROFILE\${OPENBOT_DATA_DIRECTORY}\${APP_EXECUTABLE_FILENAME}"
+      StrCpy $openBotDataFolderInstall "$PROFILE\${OPENBOT_DATA_DIRECTORY}"
+    ${elseIf} ${FileExists} "$APPDATA\${OPENBOT_DATA_DIRECTORY}\${APP_EXECUTABLE_FILENAME}"
+      StrCpy $openBotDataFolderInstall "$APPDATA\${OPENBOT_DATA_DIRECTORY}"
     ${endIf}
     !insertmacro openBotHoldsUserData $INSTDIR $0
     ${if} $0 == "1"
@@ -188,6 +196,7 @@
 ; An update runs the old uninstaller first. Keep the key then, so that links work during the update.
 ; Delete the key only when it still opens this copy. Another copy can own it now.
 !macro customUnInstall
+  !ifndef OPENBOT_PRIVATE_INSTALL
   ${ifNot} ${isUpdated}
     Push $0
     ReadRegStr $0 SHCTX "Software\Classes\openbot\shell\open\command" ""
@@ -196,6 +205,7 @@
     ${endIf}
     Pop $0
   ${endIf}
+  !endif
 !macroend
 
 ; OpenBot installs for the current user only. The application writes the openbot:// key in HKCU at

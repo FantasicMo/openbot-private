@@ -30,6 +30,7 @@ export type ChannelRequest = <T>(
   serverId: string,
   upload?: RemoteFileUpload,
   onUploadProgress?: (fraction: number) => void,
+  transferId?: string,
 ) => Promise<T>;
 export interface ChannelState {
   channels: ChannelSummary[];
@@ -500,7 +501,12 @@ export class MobileChannelStore {
   async testRoutine(serverId: string, channelId: string, routineId: string) {
     await this.request("POST", CHANNEL_ROUTES.routineTest, () => undefined, { channelId, routineId }, serverId);
   }
-  async upload(serverId: string, input: RemoteFileUpload, onProgress?: (fraction: number) => void) {
+  async upload(
+    serverId: string,
+    input: RemoteFileUpload,
+    onProgress?: (fraction: number) => void,
+    transferId?: string,
+  ) {
     const query = new URLSearchParams({ name: input.name, mime: input.mimeType });
     return this.request(
       "POST",
@@ -513,6 +519,7 @@ export class MobileChannelStore {
       serverId,
       input,
       onProgress,
+      transferId,
     );
   }
   async discard(serverId: string, attachmentId: string) {

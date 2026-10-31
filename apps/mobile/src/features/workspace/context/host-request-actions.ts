@@ -211,6 +211,7 @@ export type WorkspaceRequest = <T>(
   serverId?: string | null,
   upload?: RemoteFileUpload,
   onUploadProgress?: (fraction: number) => void,
+  transferId?: string,
 ) => Promise<T>;
 
 /** The capability checks that only read what a host advertised. */

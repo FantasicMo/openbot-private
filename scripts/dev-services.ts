@@ -3,7 +3,7 @@ import { randomBytes } from "node:crypto";
 import { existsSync, rmSync } from "node:fs";
 import { createServer } from "node:net";
 import { type NetworkInterfaceInfo, networkInterfaces } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { dirname, isAbsolute, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createOpenBotLogger, toLogValue } from "@openbot/logging";
 import { cliSpawnTarget } from "../src/backend/cli";
@@ -13,6 +13,7 @@ import {
   readDevelopmentInstanceId,
 } from "../src/main/development-profile";
 import { developmentRemoteConnectionPath } from "../src/main/development-runtime-directory";
+import { PRIVATE_APP_NAME } from "../src/main/private-access-build";
 import {
   type DevInstanceRecord,
   removeDevInstanceRecord,
@@ -104,7 +105,16 @@ const DEFAULT_REMOTE_DEBUGGING_PORTS = {
   "test-client": 9_334,
 } as const;
 
-export function servicesForTarget(target: DevelopmentTarget): DevelopmentService[] {
+export function servicesForTarget(
+  target: DevelopmentTarget,
+  environment: NodeJS.ProcessEnv = process.env,
+): DevelopmentService[] {
+  if (environment.OPENBOT_PRIVATE_BUILD === "1") {
+    if (target !== "app" && target !== "all") {
+      throw new Error("Private development supports the app target only.");
+    }
+    return ["app"];
+  }
   if (target === "all") return ["api", "remote", "app"];
   if (target === "test-client") return ["api", "remote", "app", "test-client"];
   if (target === "api") return ["api"];
@@ -143,10 +153,19 @@ export function createDevelopmentServiceSpec(
   const isTestClient = name === "test-client";
   const outputDirectory = isTestClient ? "out-dev-test-client" : "out-dev-app";
   const electronVite = resolvePackageBin(projectRoot, "electron-vite");
+  const privateDataDirectory = privateDevelopmentDataDirectory(childEnvironment);
   return {
     name,
     executable: electronVite,
-    args: ["dev", "--watch", "--outDir", outputDirectory, "--entry", join(outputDirectory, "main", "index.js")],
+    args: [
+      "dev",
+      "--watch",
+      "--outDir",
+      outputDirectory,
+      "--entry",
+      join(outputDirectory, "main", "index.js"),
+      ...(privateDataDirectory ? ["--", `--user-data-dir=${privateDataDirectory}`] : []),
+    ],
     cwd: projectRoot,
     env: {
       ...childEnvironment,
@@ -161,6 +180,14 @@ export function createDevelopmentServiceSpec(
       OPENBOT_DEV_REMOTE_ROLE: childEnvironment.OPENBOT_DEV_REMOTE_ROLE ?? (isTestClient ? "client" : "host"),
     },
   };
+}
+
+function privateDevelopmentDataDirectory(environment: NodeJS.ProcessEnv): string | null {
+  if (environment.OPENBOT_PRIVATE_BUILD !== "1") return null;
+  const directory = environment.OPENBOT_PRIVATE_DEV_DATA_DIR?.trim();
+  if (!directory) return null;
+  if (!isAbsolute(directory)) throw new Error("OPENBOT_PRIVATE_DEV_DATA_DIR must be an absolute path.");
+  return resolve(directory);
 }
 
 // The ports in the spec are the ones this instance actually won, after
@@ -181,7 +208,11 @@ export function createDevInstanceRecord(
   return {
     service: spec.name,
     instanceId: instanceId ?? "default",
-    profile: developmentUserDataName(profileKind, instanceId),
+    profile:
+      privateDevelopmentDataDirectory(spec.env) ??
+      (spec.env.OPENBOT_PRIVATE_BUILD === "1"
+        ? developmentUserDataName(profileKind, instanceId).replace(/^OpenBot/u, PRIVATE_APP_NAME)
+        : developmentUserDataName(profileKind, instanceId)),
     projectRoot: spec.cwd,
     rendererPort,
     remoteDebuggingPort,
@@ -208,6 +239,8 @@ export function developmentProfileToSeed(
   // The seed writes the app profile, which every target except `api` opens.
   const app = specs.find((spec) => spec.name === "app");
   if (!app) return null;
+  // Private development exercises the real first run, with its own local identity.
+  if (app.env.OPENBOT_PRIVATE_BUILD === "1") return null;
   const instanceId = readDevelopmentInstanceId(app.env.OPENBOT_DEV_INSTANCE_ID);
   const profile = resolve(
     resolveDevelopmentAppDataRoot(process.platform, app.env),
@@ -290,12 +323,17 @@ async function readHostingDeveloperKey(): Promise<string> {
 
 async function main(): Promise<void> {
   const { target, dryRun, force, shared, hostingTest, slack } = parseDevelopmentTarget(process.argv.slice(2));
-  if (!dryRun && prepareDevelopmentEnvironment() === "created") {
-    logger.info("Prepared local development state.");
+  const privateBuild = process.env.OPENBOT_PRIVATE_BUILD === "1";
+  if (privateBuild && (hostingTest || slack)) {
+    throw new Error("Private development does not use account hosting or public Slack tunnels.");
   }
   const services = servicesForTarget(target);
-  const developmentEnvironment = dryRun ? {} : await loadDevelopmentEnvironment(projectRoot);
+  if (!dryRun && !privateBuild && prepareDevelopmentEnvironment() === "created") {
+    logger.info("Prepared local development state.");
+  }
+  const developmentEnvironment = dryRun || privateBuild ? {} : await loadDevelopmentEnvironment(projectRoot);
   const sharedEnvironment = developmentEnvironmentForTarget(target);
+  if (privateBuild) sharedEnvironment.OPENBOT_DEV_REMOTE_ROLE = "none";
   if (hostingTest) {
     sharedEnvironment.OPENBOT_AUTH_API_URL = TEST_ACCOUNT_API_URL;
     sharedEnvironment.OPENBOT_MOBILE_AUTH_API_URL = TEST_ACCOUNT_API_URL;

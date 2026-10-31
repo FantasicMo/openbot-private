@@ -11,6 +11,7 @@ import { messages as mobileLink } from "./mobile/link";
 import { messages as mobileLiveActivity } from "./mobile/liveActivity";
 import { messages as mobileMarketplace } from "./mobile/marketplace";
 import { messages as mobileOnboarding } from "./mobile/onboarding";
+import { messages as mobilePrivate } from "./mobile/private";
 import { messages as mobileSearch } from "./mobile/search";
 import { messages as mobileServer } from "./mobile/server";
 import { messages as mobileSettings } from "./mobile/settings";
@@ -39,6 +40,7 @@ export const zhMobile = {
   ...mobileLiveActivity,
   ...mobileMarketplace,
   ...mobileOnboarding,
+  ...mobilePrivate,
   ...mobileWorkspace,
   ...mobileWorkflow,
   ...mobileShare,

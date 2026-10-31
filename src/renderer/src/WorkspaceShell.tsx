@@ -62,7 +62,7 @@ import { WorkspaceOverlays } from "./WorkspaceOverlays";
  * closes the page, as each row calls `showAgents`. The other pages of the rail - schedule, usage or settings - sit outside that
  * group and inert it.
  */
-export function WorkspaceShell(props: { account: () => CentralAuthUser }) {
+export function WorkspaceShell(props: { account: () => CentralAuthUser | null }) {
   const platform = usePlatform();
   /** A window that main opened for one chat shows that chat alone, with no rail and no sidebar. */
   const chatWindow = platform.chatWindow !== null;
@@ -155,7 +155,7 @@ export function WorkspaceShell(props: { account: () => CentralAuthUser }) {
   const remote = () => activeServer()?.kind === "remote";
   // Only Signal knows that the computer is off. A remote server is also "offline" before its first connection.
   const offlineUpsell = createHostedUpsellOffline(
-    () => remote() && activeServer()?.issue?.reference === "signal/host_unavailable",
+    () => Boolean(props.account()) && remote() && activeServer()?.issue?.reference === "signal/host_unavailable",
   );
   // The transport failure comes first: a workspace load fails when the transport fails. Signal and
   // the host send English source text, so show the issue in the reader's language. The scope failure

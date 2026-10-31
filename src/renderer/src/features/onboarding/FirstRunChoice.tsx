@@ -3,6 +3,7 @@ import { Button, ChevronRight, Spinner } from "@openbot/ui";
 import { AgentAvatar } from "@openbot/ui/features/agents/AgentAvatar";
 import { useText } from "@openbot/ui/text";
 import { createUniqueId, For, Show } from "solid-js";
+import { PRIVATE_BUILD } from "../private-access/private-build";
 import { AnalyticsConsentRow, ConsentNotice } from "./AnalyticsConsent";
 import type { OnboardingAvatarVariant } from "./onboarding-avatars";
 
@@ -103,14 +104,18 @@ export function FirstRunChoice(props: FirstRunChoiceProps) {
           </span>
           <ChevronRight class="first-run-choice-row-chevron" aria-hidden="true" />
         </Button>
-        <AnalyticsConsentRow
-          checked={props.analytics}
-          disabled={props.disabled}
-          agents={props.team.slice(2, 5)}
-          onChange={(enabled) => props.onAnalyticsChange(enabled)}
-        />
+        <Show when={!PRIVATE_BUILD}>
+          <AnalyticsConsentRow
+            checked={props.analytics}
+            disabled={props.disabled}
+            agents={props.team.slice(2, 5)}
+            onChange={(enabled) => props.onAnalyticsChange(enabled)}
+          />
+        </Show>
       </div>
-      <ConsentNotice onOpenTerms={() => props.onOpenTerms()} onOpenPrivacy={() => props.onOpenPrivacy()} />
+      <Show when={!PRIVATE_BUILD}>
+        <ConsentNotice onOpenTerms={() => props.onOpenTerms()} onOpenPrivacy={() => props.onOpenPrivacy()} />
+      </Show>
       <Show when={props.reason}>
         {(reason) => (
           <p class="onboarding-next-reason first-run-choice-reason" id={reasonId}>

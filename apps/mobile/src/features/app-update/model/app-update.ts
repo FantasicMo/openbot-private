@@ -11,6 +11,7 @@ import { useEffect } from "react";
 import { AppState, Linking } from "react-native";
 import { create } from "zustand";
 import { useMobileSession } from "@/features/auth/context/mobile-session-context";
+import { isPrivateBuild } from "@/features/private-access/private-build";
 import { devLatestAppVersion } from "@/shared/lib/dev-feature-overrides";
 import { currentAppVersion, refreshMobileFeatures, useLatestAppVersion } from "@/shared/lib/mobile-features";
 import { isIOS } from "@/shared/lib/platform";
@@ -64,7 +65,13 @@ export async function dismissAppUpdate(update: AppUpdate): Promise<void> {
  * place. The account server names the newest store version; it reads again when the app comes back
  * to the foreground, at most once a minute.
  */
-export function useAppUpdate(): AppUpdate | null {
+export const useAppUpdate = isPrivateBuild ? usePrivateAppUpdate : useOfficialAppUpdate;
+
+function usePrivateAppUpdate(): null {
+  return null;
+}
+
+function useOfficialAppUpdate(): AppUpdate | null {
   const { session } = useMobileSession();
   const apiUrl = session?.apiUrl ?? null;
   const latest = useLatestAppVersion(apiUrl ?? "");
@@ -101,6 +108,7 @@ export function useAppUpdate(): AppUpdate | null {
  * new native version itself.
  */
 export async function installAppUpdate(update: AppUpdate, reloadColor: string): Promise<void> {
+  if (isPrivateBuild) return;
   if (update.kind === "ready") {
     await Updates.reloadAsync({
       reloadScreenOptions: { backgroundColor: reloadColor, fade: true, spinner: { enabled: false } },

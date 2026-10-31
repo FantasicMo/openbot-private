@@ -133,7 +133,8 @@ import { type DynamicRecord, isBoolean, isNumber, isOneOf, isString } from "@ope
 
 export function decodeAppInfo(value: unknown): AppInfo {
   const info = decodeRecord(value, "app info");
-  const { platform, variant, analyticsCaptureUrl } = info;
+  const { platform, variant, analyticsCaptureUrl, privateBuild } = info;
+  if (privateBuild !== undefined && typeof privateBuild !== "boolean") throw new Error("Invalid private build flag.");
   if (!isOneOf(["darwin", "win32", "linux"] as const, platform)) throw new Error("Invalid platform.");
   if (!isOneOf(["production", "dev", "preview"] as const, variant)) throw new Error("Invalid variant.");
   if (analyticsCaptureUrl !== undefined && !isString(analyticsCaptureUrl))
@@ -143,6 +144,7 @@ export function decodeAppInfo(value: unknown): AppInfo {
     version: requiredString(info, "version"),
     platform,
     variant,
+    ...(privateBuild === undefined ? {} : { privateBuild }),
     ...(analyticsCaptureUrl === undefined ? {} : { analyticsCaptureUrl }),
   };
 }

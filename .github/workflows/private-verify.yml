@@ -1,0 +1,92 @@
+name: Verify private access
+
+on:
+  workflow_dispatch:
+  workflow_call:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    name: Private contracts, transports and IPC boundaries
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      CI: "1"
+      OPENBOT_PRIVATE_BUILD: "1"
+      ELECTRON_SKIP_BINARY_DOWNLOAD: "1"
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Node
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: "24.22.2"
+
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+        with:
+          bun-version: "1.4.2"
+
+      - name: Install locked dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Check source lint
+        run: bun run lint
+
+      - name: Check shared UI boundaries
+        run: bun run check:ui
+
+      - name: Check private package types
+        run: bun run --cwd packages/private-access typecheck
+
+      - name: Check desktop main and preload types
+        run: bun run typecheck:node
+
+      - name: Check desktop renderer types
+        run: bun run typecheck:renderer
+
+      - name: Check mobile consumer types
+        run: bun run --cwd apps/mobile typecheck
+
+      - name: Check private gateway and pairing service
+        run: bun scripts/private-access-gateway-e2e.ts
+
+      - name: Check real TeamStore persistence and account boundary
+        run: bun scripts/private-access-host-e2e.ts
+
+      - name: Check mobile private transport and recovery
+        run: bun scripts/private-mobile-transport-e2e.ts
+
+      - name: Check IPC, preload and renderer security boundaries
+        run: >-
+          bun run test:desktop --
+          src/main/ipc/private-access-handlers.test.ts
+          src/main/trusted-ipc.test.ts
+          src/main/content-security-policy.test.ts
+          src/main/renderer-permissions.test.ts
+          src/main/ipc-channel-coverage.test.ts
+          src/preload/private-access-decoding.test.ts
+          src/preload/app-decoding.test.ts
+          src/preload/bridge-group.test.ts
+          --maxWorkers=1
+
+      - name: Require unchanged locked dependencies
+        run: git diff --exit-code -- bun.lock
+
+      - name: Upload redacted service reports
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: private-verification-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            .openbot-build/private-access-gateway-e2e/report.json
+            .openbot-build/private-access-host-e2e/report.json
+            .openbot-build/private-mobile-transport-e2e/report.json
+          include-hidden-files: true
+          if-no-files-found: warn
+          retention-days: 30

@@ -71,7 +71,7 @@ import type { ConversationThreads } from "./conversation-types";
  * rather than captured once.
  */
 
-export function WorkspaceConversation(props: { account: () => CentralAuthUser }) {
+export function WorkspaceConversation(props: { account: () => CentralAuthUser | null }) {
   const scopeIsCurrent = createScopeGuard();
   const serverScope = useServerScope();
   const platform = usePlatform();
@@ -551,7 +551,7 @@ export function WorkspaceConversation(props: { account: () => CentralAuthUser })
         browserControlState={browserControlState()}
         server={activeServer()}
         presence={teamPresence()}
-        currentUserEmail={props.account().email}
+        currentUserEmail={props.account()?.email ?? ""}
         isOwnSender={(senderId) => {
           const state = auth.centralAuth();
           return isReaderAuthor(senderId, {

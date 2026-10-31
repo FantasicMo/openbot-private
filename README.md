@@ -1,4 +1,12 @@
-# OpenBot
+# OpenBot Private
+
+This fork adds account-free Windows and Android access through a private HTTPS host. It preserves
+the upstream license and existing provider integrations. It does not require an OpenBot account.
+The implementation is under acceptance testing; a source check is not a packaged-device result.
+
+See [private architecture](docs/architecture/private-access.md),
+[candidate builds](docs/private-candidates.md), [private development](docs/private-development.md),
+and [Clash Mi access](docs/private-clash-mi.md). The upstream project description follows.
 
 [![CI](https://github.com/nightly-labs/openbot/actions/workflows/ci.yml/badge.svg)](https://github.com/nightly-labs/openbot/actions/workflows/ci.yml)
 [![License](https://img.shields.io/badge/license-PolyForm_Noncommercial_1.0.0-blue.svg)](LICENSE)

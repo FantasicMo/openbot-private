@@ -627,6 +627,14 @@ function untypedRequest<Channel extends string>(channel: Channel): RequestEndpoi
 }
 
 export const IPC_ENDPOINTS = {
+  privateAccess: {
+    status: request<undefined, PrivateAccessStatus>()("private-access:status"),
+    configure: request<ConfigurePrivateAccessInput, PrivateAccessStatus>()("private-access:configure"),
+    createPairing: request<CreatePrivatePairingInput, PrivateAccessPairing>()("private-access:create-pairing"),
+    revokeDevice: request<RevokePrivateDeviceInput, PrivateAccessStatus>()("private-access:revoke-device"),
+    revokeSession: request<RevokePrivateSessionInput, PrivateAccessStatus>()("private-access:revoke-session"),
+    changed: event<PrivateAccessStatus>()("private-access:changed"),
+  },
   app: {
     getAppInfo: request<undefined, AppInfo>()("app:get-info"),
     getSetupState: request<undefined, AppSetupState>()("app:get-setup-state"),
@@ -1852,6 +1860,7 @@ export type IpcEndpoints = typeof IPC_ENDPOINTS;
  * read this table; the preload and the preview mock are checked against it through the type.
  */
 export const IPC_GROUP_PATHS = {
+  privateAccess: "privateAccess",
   app: "",
   maintenance: "maintenance",
   providers: "",
@@ -1991,3 +2000,12 @@ export type BridgedDesktopApi = PathApi<""> & { [Path in NestedPath]: PathApi<Pa
 export function groupApiMethodName(key: string, endpoint: IpcEndpoint): string {
   return endpoint.kind === "event" ? `on${key.charAt(0).toUpperCase()}${key.slice(1)}` : key;
 }
+
+import type {
+  ConfigurePrivateAccessInput,
+  CreatePrivatePairingInput,
+  PrivateAccessPairing,
+  PrivateAccessStatus,
+  RevokePrivateDeviceInput,
+  RevokePrivateSessionInput,
+} from "./ipc-private-access";

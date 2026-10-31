@@ -3,7 +3,6 @@ import { TEAM_API_ROUTES } from "@openbot/contracts/team-api-routes";
 import { isQueueEditRoute, QueueEditRejectedError } from "@openbot/contracts/team-protocol/queue-edit-v1";
 import type { TeamProtocolV2Json } from "@openbot/contracts/team-protocol/v2";
 import { sourceText } from "@openbot/i18n/source";
-import type { RemoteTeamDirectoryClient } from "@openbot/team-client";
 import { runTeamEffect } from "@openbot/team-client";
 import {
   createRemoteCommandMailbox,
@@ -25,6 +24,7 @@ import type {
   BrowserViewBridgeOpen,
   RemoteBrowserViewSession,
 } from "@/features/browser/model/browser-view-bridge";
+import type { MobileDirectoryPort } from "@/features/private-access/private-ports";
 import { supportLog, supportLogUrl } from "@/features/support/model/support-log";
 import { InactiveRequestError } from "@/features/workspace/model/pending-approvals";
 import { referencedError } from "@/features/workspace/model/referenced-error";
@@ -49,6 +49,7 @@ export interface RemoteTeamTransportRef {
     upload?: RemoteFileUpload,
     /** Hears the fraction of the uploaded file sent so far, from 0 to 1. */
     onUploadProgress?: (fraction: number) => void,
+    transferId?: string,
   ): Promise<T>;
   /** Null until the peer page is ready for views. Events of a closed view are dropped. */
   openBrowserView(
@@ -59,7 +60,7 @@ export interface RemoteTeamTransportRef {
 
 interface RemoteTeamTransportProps {
   active: boolean;
-  directory: RemoteTeamDirectoryClient;
+  directory: MobileDirectoryPort;
   onConnectionUpdate: (update: RemoteTeamConnectionUpdate) => void;
   /** Signal says this account's server list changed on another device. */
   onMembershipChanged?: () => Promise<void>;

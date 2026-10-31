@@ -82,6 +82,7 @@ interface OutboxStoreOptions {
   describeError: (error: unknown) => string;
   /** Reports a failed attempt. A stopped upload is not a failure. */
   reportFailure?: (error: unknown, message: OutboxMessage) => void;
+  cancelTransfer?: (message: OutboxMessage) => void;
   now?: () => number;
   randomId: () => string;
 }
@@ -348,6 +349,8 @@ export class OutboxStore {
     const upload = this.uploads.get(clientMessageId);
     if (!upload) return;
     this.cancelRequests.add(clientMessageId);
+    const message = this.messages.find((item) => item.clientMessageId === clientMessageId);
+    if (message) this.options.cancelTransfer?.(message);
     this.uploads.set(clientMessageId, { ...upload, cancelling: true });
     this.publish();
   }

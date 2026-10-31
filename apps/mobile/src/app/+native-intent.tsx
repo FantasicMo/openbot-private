@@ -1,10 +1,13 @@
 import { acceptDevelopmentConnectLink } from "@/features/auth/model/development-connect-link";
 import { redirectIncomingLink } from "@/features/links/model/incoming-links";
 import { isLiveActivityLink, liveActivityRoute } from "@/features/live-activity/model/live-activity-link";
+import { isPrivateBuild } from "@/features/private-access/private-build";
+import { rememberPrivateOffer } from "@/features/private-access/private-incoming";
 import { isMessagingInstallReturn } from "@/features/servers/model/connectors";
 import { isIncomingShareLink } from "@/features/share/model/share-link";
 
 export function redirectSystemPath({ path, initial }: { path: string; initial: boolean }) {
+  if (isPrivateBuild) return rememberPrivateOffer(path) ? "/incoming-link" : "/";
   // `bun run dev:mobile` pairs a simulator without a tap. DevelopmentConnectLinkHandler redeems it.
   if (acceptDevelopmentConnectLink(path, __DEV__)) return null;
   // The browser session of Server settings › Connectors takes the return of a Slack or Discord install.

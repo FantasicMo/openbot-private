@@ -11,6 +11,7 @@ import { useEffect, useRef, useState } from "react";
 import { Alert, Pressable, View } from "react-native";
 import { useUniwind } from "uniwind";
 import { useMobileSession, useQueryScope } from "@/features/auth/context/mobile-session-context";
+import { isPrivateBuild } from "@/features/private-access/private-build";
 import { hostedServerCalls } from "@/features/servers/api/hosted-servers";
 import { ServerAvatar } from "@/features/servers/components/server-avatar";
 import { ServerStatusLabel } from "@/features/servers/components/server-status-label";
@@ -134,18 +135,20 @@ export function ServerSettingsScreen() {
         >
           <Typography.Paragraph>{t("mobile.server.settings.yourRole")}</Typography.Paragraph>
         </SettingsRow>
-        <SettingsRow
-          trailing={
-            memberCount === undefined ? undefined : (
-              <TrailingValue
-                value={t("mobile.server.settings.memberCount", { count: memberCount, limit: memberLimit })}
-              />
-            )
-          }
-          onPress={() => router.push({ pathname: "/server-settings/members", params: { serverId } })}
-        >
-          <Typography.Paragraph>{t("mobile.server.settings.members")}</Typography.Paragraph>
-        </SettingsRow>
+        {!isPrivateBuild ? (
+          <SettingsRow
+            trailing={
+              memberCount === undefined ? undefined : (
+                <TrailingValue
+                  value={t("mobile.server.settings.memberCount", { count: memberCount, limit: memberLimit })}
+                />
+              )
+            }
+            onPress={() => router.push({ pathname: "/server-settings/members", params: { serverId } })}
+          >
+            <Typography.Paragraph>{t("mobile.server.settings.members")}</Typography.Paragraph>
+          </SettingsRow>
+        ) : null}
         {canManageServerRoles(serverId) ? (
           <SettingsRow onPress={() => router.push({ pathname: "/server-settings/roles", params: { serverId } })}>
             <Typography.Paragraph>{t("mobile.server.route.roles")}</Typography.Paragraph>
@@ -238,12 +241,14 @@ export function ServerSettingsScreen() {
             disabled={busy}
             onPress={() =>
               Alert.alert(
-                t("mobile.server.settings.leaveTitle", { name: server.name }),
-                t("mobile.server.settings.leaveBody"),
+                isPrivateBuild
+                  ? t("mobile.private.forgetHost")
+                  : t("mobile.server.settings.leaveTitle", { name: server.name }),
+                isPrivateBuild ? server.name : t("mobile.server.settings.leaveBody"),
                 [
                   { text: t("common.cancel"), style: "cancel" },
                   {
-                    text: t("mobile.server.settings.leave"),
+                    text: isPrivateBuild ? t("mobile.private.forgetHost") : t("mobile.server.settings.leave"),
                     style: "destructive",
                     onPress: () =>
                       void perform(async () => {
@@ -256,7 +261,7 @@ export function ServerSettingsScreen() {
             }
           >
             <Typography.Paragraph className="text-danger-text">
-              {t("mobile.server.settings.leave")}
+              {isPrivateBuild ? t("mobile.private.forgetHost") : t("mobile.server.settings.leave")}
             </Typography.Paragraph>
           </SettingsRow>
         </SettingsSection>

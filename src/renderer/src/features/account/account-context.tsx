@@ -3,6 +3,7 @@ import { currentText } from "@openbot/ui/text";
 import { createMemo, createSignal, createStore, flush, onCleanup, onSettled } from "solid-js";
 import { type DesktopAnalyticsProperties, desktopAnalytics } from "../../analytics";
 import { createSimpleContext } from "../../simple-context";
+import { PRIVATE_BUILD } from "../private-access/private-build";
 import { accountPort } from "./account-port";
 
 type MobileConnectAction = DesktopAnalyticsProperties<"mobile_connect_action">["action"];
@@ -59,7 +60,9 @@ function authFailureCode(value: string | undefined): string {
 const Auth = createSimpleContext({
   name: "Auth",
   init: () => {
-    const [centralAuth, setCentralAuth] = createSignal<CentralAuthState>({ status: "loading" });
+    const [centralAuth, setCentralAuth] = createSignal<CentralAuthState>({
+      status: PRIVATE_BUILD ? "signed_out" : "loading",
+    });
     const [authSuccessVisible, setAuthSuccessVisible] = createSignal(false);
     const [accountUsageState, setAccountUsageState] = createStore<{
       targetKey: string | null;
@@ -104,6 +107,7 @@ const Auth = createSimpleContext({
     }
 
     onSettled(() => {
+      if (PRIVATE_BUILD) return;
       const unsubscribe = accountPort().auth.onEvent((state) => {
         flush(() => applyCentralAuthState(state));
       });

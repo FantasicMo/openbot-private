@@ -10,13 +10,13 @@ import { ChatListPaneProvider } from "@/features/agents/components/chat-list-pan
 import { createChatNavigationGate } from "@/features/agents/model/chat-navigation-gate";
 import { ConnectedScreen } from "@/features/agents/screens/connected-screen";
 import { whenUnlocked } from "@/features/app-lock/model/app-lock";
-import { useMobileSession } from "@/features/auth/context/mobile-session-context";
 import { AudioWaveformHost } from "@/features/chat/components/audio-waveform-host";
 import { MermaidRendererHost } from "@/features/chat/components/mermaid-renderer-host";
 import { OutboxProvider } from "@/features/chat/context/outbox-context";
 import { QueuedMessagesProvider } from "@/features/chat/context/queued-messages-context";
 import { setLiveActivityNavigator } from "@/features/live-activity/model/live-activity-link";
 import { HomeOnboardingProvider, useHomeOnboarding } from "@/features/onboarding/context/home-onboarding-context";
+import { useMobileWorkspaceAccess } from "@/features/private-access/mobile-workspace-access";
 import type { NotificationTarget } from "@/features/push-notifications/push-notifications-native.types";
 import { useNotificationTaps } from "@/features/push-notifications/use-notification-taps";
 import type { QuickActionTarget } from "@/features/quick-actions/model/quick-action-items";
@@ -583,8 +583,8 @@ function AuthenticatedSplit({ children }: PropsWithChildren) {
 }
 
 export default function AuthenticatedLayout() {
-  const { session } = useMobileSession();
-  const workspaceKey = session ? `${session.apiUrl}:${session.user.id}` : "signed-out";
+  const access = useMobileWorkspaceAccess();
+  const workspaceKey = access ? `${access.namespace}:${access.identityId}` : "signed-out";
 
   return (
     <MobileWorkspaceProvider key={workspaceKey}>

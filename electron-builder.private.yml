@@ -1,0 +1,13 @@
+extends: ./electron-builder.yml
+appId: io.github.fantasicmo.openbot
+productName: OpenBot Private
+artifactName: OpenBot-Private-${version}-${arch}.${ext}
+# Private pairing uses an in-app QR/JSON offer. Keep the official desktop scheme with the official app.
+protocols: []
+# The first private release uses reviewed manual updates from our fork.
+publish: []
+directories:
+  output: dist-private
+nsis:
+  include: build/installer-private.nsh
+  runAfterFinish: false

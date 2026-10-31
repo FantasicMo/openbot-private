@@ -3,6 +3,8 @@ import { createMemo, createSignal, flush, onSettled } from "solid-js";
 import { EMPTY_TEAM_PRESENCE } from "../../app-defaults";
 import { createSimpleContext } from "../../simple-context";
 import { useAuth } from "../account/account-context";
+import { PRIVATE_BUILD } from "../private-access/private-build";
+import { useServers } from "../servers/servers-context";
 import { teamPort } from "./team-port";
 
 /**
@@ -28,9 +30,12 @@ const Presence = createSimpleContext({
   name: "Presence",
   init: () => {
     const { centralAuth } = useAuth();
+    const { activeServer } = useServers();
     const [teamPresence, setTeamPresence] = createSignal<TeamPresenceSnapshot>(EMPTY_TEAM_PRESENCE);
 
     const currentTeamMember = createMemo(() => {
+      if (PRIVATE_BUILD && activeServer()?.kind === "local")
+        return teamPresence().members.find((member) => member.role === "owner" && !member.disabled);
       const state = centralAuth();
       if (state.status !== "signed_in") return undefined;
       const email = state.user.email.trim().toLowerCase();

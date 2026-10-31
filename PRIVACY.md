@@ -1,5 +1,25 @@
 # Privacy
 
+## Private fork builds
+
+Builds made with `OPENBOT_PRIVATE_BUILD=1` use a local host identity and paired device credentials.
+The desktop keeps those credentials in its separate private profile; Android uses SecureStore.
+The private account and host directory do not use the OpenBot account Worker, Signal, hosted
+servers, email sign-in, product analytics, mobile push registration or official app updates.
+The host's TeamStore remains the authority for sessions and device revocation.
+
+Android sends HTTPS requests and WSS events directly to the configured private host. Tailscale
+Serve terminates HTTPS on that computer and forwards to one loopback gateway. Tailscale has its
+own account, network control service and optional relay path; this fork does not replace those
+services. No Funnel or public listener is required. Provider sign-in, model requests, installed
+tools, plugins and sites still have their own network use and privacy rules. A private host does
+not make a cloud model offline.
+
+Initial private updates are manual candidate packages from this fork. The remaining sections
+describe upstream features and the non-private build. Read the
+[private implementation and acceptance scope](docs/architecture/private-access.md) for what has
+actually been checked.
+
 OpenBot is local-first, but it is not offline-only. Agent workspaces, conversations, attachments,
 browser data, and team data stay on the computer that runs OpenBot. The optional OpenBot account
 service stores the minimum central data needed for email sign-in, account avatars, remote host

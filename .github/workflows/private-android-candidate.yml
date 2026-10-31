@@ -1,0 +1,349 @@
+name: Build private Android candidate
+
+on:
+  workflow_dispatch:
+    inputs:
+      version_code:
+        description: Positive Android versionCode. Use a larger value for an installed app upgrade.
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: private-android-candidate-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  verify:
+    uses: ./.github/workflows/private-verify.yml
+
+  candidate:
+    name: Build signed APK candidate
+    needs: verify
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    outputs:
+      artifact_id: ${{ steps.upload_build.outputs.artifact-id }}
+    env:
+      CI: "1"
+      OPENBOT_PRIVATE_BUILD: "1"
+      OPENBOT_ANDROID_VERSION_CODE: ${{ inputs.version_code }}
+      EXPO_PUBLIC_APP_ENV: preview
+      EXPO_NO_TELEMETRY: "1"
+      ELECTRON_SKIP_BINARY_DOWNLOAD: "1"
+    steps:
+      - name: Require private signing configuration
+        shell: bash
+        env:
+          KEYSTORE_BASE64: ${{ secrets.PRIVATE_ANDROID_KEYSTORE_BASE64 }}
+          STORE_PASSWORD: ${{ secrets.PRIVATE_ANDROID_STORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.PRIVATE_ANDROID_KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.PRIVATE_ANDROID_KEY_PASSWORD }}
+          CERT_SHA256: ${{ vars.PRIVATE_ANDROID_CERT_SHA256 }}
+        run: |
+          set -euo pipefail
+          missing=()
+          for name in KEYSTORE_BASE64 STORE_PASSWORD KEY_ALIAS KEY_PASSWORD CERT_SHA256; do
+            if [[ -z "${!name}" ]]; then missing+=("$name"); fi
+          done
+          if (( ${#missing[@]} )); then
+            echo "Missing private Android signing configuration: ${missing[*]}. See apps/mobile/docs/private-android-build.md." >&2
+            exit 1
+          fi
+          if [[ ! "$OPENBOT_ANDROID_VERSION_CODE" =~ ^[1-9][0-9]{0,9}$ ]] || (( OPENBOT_ANDROID_VERSION_CODE > 2100000000 )); then
+            echo 'version_code must be an integer from 1 to 2100000000.' >&2
+            exit 1
+          fi
+          if [[ ! "${CERT_SHA256//:/}" =~ ^[[:xdigit:]]{64}$ ]]; then
+            echo 'PRIVATE_ANDROID_CERT_SHA256 must contain the SHA-256 signing certificate fingerprint.' >&2
+            exit 1
+          fi
+
+      - name: Check out candidate source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Node
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: "24.22.2"
+
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+        with:
+          bun-version: "1.4.2"
+
+      - name: Set up Java
+        uses: actions/setup-java@de7274f081f381c8f8158605e0321c36c376e2e6 # v6.0.1
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Prepare Android tools and build output
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -d "$ANDROID_HOME"
+          command -v sdkmanager
+          # Gradle installs the SDK/NDK versions selected by the locked Expo/RN packages.
+          # Ignore only the expected SIGPIPE of yes after sdkmanager closes its input.
+          set +o pipefail
+          yes | sdkmanager --licenses > /dev/null
+          set -o pipefail
+          mkdir -p "$RUNNER_TEMP/private-android-candidate" "$HOME/.gradle"
+          {
+            echo 'org.gradle.jvmargs=-Xmx6g -XX:MaxMetaspaceSize=2g -Dfile.encoding=UTF-8'
+            echo 'org.gradle.workers.max=2'
+          } >> "$HOME/.gradle/gradle.properties"
+          echo "CANDIDATE_DIR=$RUNNER_TEMP/private-android-candidate" >> "$GITHUB_ENV"
+          echo "OPENBOT_ANDROID_KEYSTORE_PATH=$RUNNER_TEMP/openbot-private-signing.jks" >> "$GITHUB_ENV"
+
+      - name: Free disposable runner tools and require build capacity
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "$RUNNER_ENVIRONMENT" != 'github-hosted' || "$RUNNER_OS" != 'Linux' ]]; then
+            echo 'Runner cleanup is restricted to disposable GitHub-hosted Linux jobs.' >&2
+            exit 1
+          fi
+          df -h "$GITHUB_WORKSPACE" "$RUNNER_TEMP" > "$CANDIDATE_DIR/disk-before.txt"
+          # Same explicit unused tool directories as upstream release-android.yml.
+          # Retain the Android SDK, Java, Node, Bun and the rest of the hosted tool cache.
+          sudo rm -rf -- /usr/share/dotnet /opt/ghc /usr/local/.ghcup /usr/local/share/boost /opt/hostedtoolcache/CodeQL
+          df -h "$GITHUB_WORKSPACE" "$RUNNER_TEMP" > "$CANDIDATE_DIR/disk-after.txt"
+          # Check before the frozen install consumes space.
+          # This initial budget is a gate, not a measured maximum for all future native builds.
+          required_kib=$((25 * 1024 * 1024))
+          for build_root in "$GITHUB_WORKSPACE" "$RUNNER_TEMP"; do
+            available_kib="$(df -Pk "$build_root" | awk 'NR == 2 {print $4}')"
+            if [[ ! "$available_kib" =~ ^[0-9]+$ ]] || (( available_kib < required_kib )); then
+              echo "The two-ABI Android candidate needs at least 25 GiB free before install: $build_root." >&2
+              echo 'The bounded runner cleanup did not provide enough capacity. No dependency install or build was started.' >&2
+              df -h "$build_root"
+              exit 1
+            fi
+          done
+
+      - name: Install locked dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Check build configuration source
+        run: bunx biome check --max-diagnostics=none apps/mobile/app.config.js apps/mobile/plugins/with-private-android-signing.js
+
+      - name: Generate private Android project
+        working-directory: apps/mobile
+        run: bunx expo prebuild --platform android --no-install
+
+      - name: Build signed standalone APK
+        working-directory: apps/mobile/android
+        shell: bash
+        env:
+          KEYSTORE_BASE64: ${{ secrets.PRIVATE_ANDROID_KEYSTORE_BASE64 }}
+          OPENBOT_ANDROID_STORE_PASSWORD: ${{ secrets.PRIVATE_ANDROID_STORE_PASSWORD }}
+          OPENBOT_ANDROID_KEY_ALIAS: ${{ secrets.PRIVATE_ANDROID_KEY_ALIAS }}
+          OPENBOT_ANDROID_KEY_PASSWORD: ${{ secrets.PRIVATE_ANDROID_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          umask 077
+          trap 'rm -f "$OPENBOT_ANDROID_KEYSTORE_PATH"' EXIT
+          printf '%s' "$KEYSTORE_BASE64" | base64 --decode > "$OPENBOT_ANDROID_KEYSTORE_PATH"
+          ./gradlew app:assembleRelease --no-daemon --no-configuration-cache --max-workers=2 \
+            -PreactNativeArchitectures=arm64-v8a,x86_64
+          cp app/build/outputs/apk/release/app-release.apk "$CANDIDATE_DIR/openbot-private.apk"
+
+      - name: Verify identity, signature and native ABIs
+        shell: bash
+        env:
+          CERT_SHA256: ${{ vars.PRIVATE_ANDROID_CERT_SHA256 }}
+        run: |
+          set -euo pipefail
+          tools_dir="$(printf '%s\n' "$ANDROID_HOME"/build-tools/* | sort -V | tail -n 1)"
+          apk="$CANDIDATE_DIR/openbot-private.apk"
+          "$tools_dir/apksigner" verify --verbose --print-certs "$apk" > "$CANDIDATE_DIR/signature.txt"
+          expected="$(printf '%s' "$CERT_SHA256" | tr -d ':' | tr '[:upper:]' '[:lower:]')"
+          actual="$(sed -n 's/^Signer #1 certificate SHA-256 digest: //p' "$CANDIDATE_DIR/signature.txt" | tr '[:upper:]' '[:lower:]')"
+          if [[ "$actual" != "$expected" ]]; then
+            echo 'The APK signing certificate does not match PRIVATE_ANDROID_CERT_SHA256.' >&2
+            exit 1
+          fi
+          "$tools_dir/aapt" dump badging "$apk" > "$CANDIDATE_DIR/apk-badging.txt"
+          if ! head -n 1 "$CANDIDATE_DIR/apk-badging.txt" | grep -Fq "name='io.github.fantasicmo.openbot' versionCode='$OPENBOT_ANDROID_VERSION_CODE'"; then
+            echo 'The APK application ID or versionCode is incorrect.' >&2
+            exit 1
+          fi
+          unzip -Z1 "$apk" > "$CANDIDATE_DIR/apk-files.txt"
+          sed -n 's#^lib/\([^/]*\)/.*#\1#p' "$CANDIDATE_DIR/apk-files.txt" | sort -u > "$CANDIDATE_DIR/abis.txt"
+          printf 'arm64-v8a\nx86_64\n' | diff - "$CANDIDATE_DIR/abis.txt"
+          if ! grep -Fx 'assets/index.android.bundle' "$CANDIDATE_DIR/apk-files.txt" > /dev/null; then
+            echo 'The APK has no embedded JavaScript bundle.' >&2
+            exit 1
+          fi
+          (cd "$CANDIDATE_DIR" && sha256sum openbot-private.apk > SHA256SUMS)
+
+      - name: Record source and tool versions
+        shell: bash
+        run: |
+          set -euo pipefail
+          {
+            printf 'Commit: %s\nRun: %s/%s/actions/runs/%s\nRun attempt: %s\n' "$GITHUB_SHA" "$GITHUB_SERVER_URL" "$GITHUB_REPOSITORY" "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT"
+            sha256sum bun.lock
+            printf 'versionCode: %s\nNode: ' "$OPENBOT_ANDROID_VERSION_CODE"
+            node --version
+            printf 'Bun: '
+            bun --version
+            java -version 2>&1
+            node -e 'for (const name of ["expo", "react-native", "react"]) { const p = require.resolve(name + "/package.json", {paths: ["apps/mobile"]}); console.log(name + ": " + require(p).version); }'
+            cat apps/mobile/android/gradle/wrapper/gradle-wrapper.properties
+            (cd apps/mobile/android && ./gradlew --version --no-daemon)
+            sdkmanager --list_installed
+          } > "$CANDIDATE_DIR/tool-versions.txt"
+          {
+            echo 'Packaging checks passed. This intermediate build artifact has not run emulator startup smoke.'
+            echo 'Private pairing and HTTPS/WSS runtime source is implemented; real-host and phone acceptance are pending.'
+            echo 'The independent emulator job must test these same APK bytes before the final candidate artifact is evaluated.'
+            echo 'No EAS, Google Play, provider account, or production tailnet credentials are used.'
+          } > "$CANDIDATE_DIR/ACCEPTANCE.txt"
+
+      - name: Upload candidate and evidence
+        id: upload_build
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: private-android-build-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ env.CANDIDATE_DIR }}
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Summarize candidate
+        shell: bash
+        run: |
+          {
+            echo '## Private Android build candidate'
+            echo "Commit: $GITHUB_SHA"
+            echo "Intermediate artifact: private-android-build-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+            cat "$CANDIDATE_DIR/SHA256SUMS"
+            echo 'Package: io.github.fantasicmo.openbot; ABIs: arm64-v8a, x86_64.'
+            echo 'Packaging evidence only. The independent emulator job reports startup smoke; real-host and phone acceptance remain pending.'
+            echo 'Nothing was published to a release, store, or update service.'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  emulator:
+    name: Smoke test the same signed release APK
+    needs: candidate
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    env:
+      CI: "1"
+      CANDIDATE_DIR: ${{ runner.temp }}/private-android-candidate
+      ANDROID_AVD_HOME: ${{ runner.temp }}/private-android-avd
+      SOURCE_ARTIFACT_ID: ${{ needs.candidate.outputs.artifact_id }}
+    steps:
+      - name: Check out smoke script
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Download the signed build artifact
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          artifact-ids: ${{ needs.candidate.outputs.artifact_id }}
+          path: ${{ env.CANDIDATE_DIR }}
+
+      - name: Set up Java for Android SDK tools
+        uses: actions/setup-java@de7274f081f381c8f8158605e0321c36c376e2e6 # v6.0.1
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Prepare a disposable API 36 x86_64 emulator
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$RUNNER_ENVIRONMENT" == 'github-hosted' && "$RUNNER_OS" == 'Linux' ]]
+          test -c /dev/kvm
+          sudo chmod a+rw /dev/kvm
+          command -v sdkmanager
+          command -v avdmanager
+          set +o pipefail
+          yes | sdkmanager --licenses > /dev/null
+          set -o pipefail
+          sdkmanager 'platform-tools' 'emulator' 'build-tools;37.0.0' 'system-images;android-36;google_apis;x86_64'
+          mkdir -p "$ANDROID_AVD_HOME" "$CANDIDATE_DIR/emulator"
+          printf 'no\n' | avdmanager create avd --name openbot-private-smoke \
+            --package 'system-images;android-36;google_apis;x86_64' \
+            --path "$ANDROID_AVD_HOME/openbot-private-smoke.avd" --device pixel_6
+          {
+            python3 --version
+            java -version 2>&1
+            "$ANDROID_HOME/platform-tools/adb" version
+            "$ANDROID_HOME/emulator/emulator" -version
+            "$ANDROID_HOME/emulator/emulator" -accel-check
+            sdkmanager --list_installed
+          } > "$CANDIDATE_DIR/emulator/tools.txt"
+
+      - name: Start the release APK and check private first run
+        id: startup
+        shell: bash
+        env:
+          CERT_SHA256: ${{ vars.PRIVATE_ANDROID_CERT_SHA256 }}
+        run: python3 scripts/private-android-emulator-smoke.py --candidate-dir "$CANDIDATE_DIR"
+
+      - name: Record the candidate acceptance state
+        if: always()
+        shell: bash
+        env:
+          STARTUP_OUTCOME: ${{ steps.startup.outcome }}
+        run: |
+          python3 - <<'PY'
+          import hashlib, json, os
+          from pathlib import Path
+          candidate = Path(os.environ['CANDIDATE_DIR'])
+          if not (candidate / 'openbot-private.apk').exists():
+              raise SystemExit('No downloaded APK is available for a final candidate artifact.')
+          report_path = candidate / 'emulator' / 'report.json'
+          report = json.loads(report_path.read_text()) if report_path.exists() else {}
+          digest = hashlib.sha256((candidate / 'openbot-private.apk').read_bytes()).hexdigest()
+          expected = (candidate / 'SHA256SUMS').read_text().strip()
+          same_apk = expected == f'{digest}  openbot-private.apk'
+          passed = os.environ.get('STARTUP_OUTCOME') == 'success' and report.get('passed') is True and same_apk
+          state = {
+              'schema': 1,
+              'status': 'startup_smoke_passed' if passed else 'startup_smoke_not_accepted',
+              'commit': os.environ['GITHUB_SHA'],
+              'runAttempt': os.environ['GITHUB_RUN_ATTEMPT'],
+              'buildArtifactId': os.environ['SOURCE_ARTIFACT_ID'],
+              'apkSha256': digest,
+              'unchangedBuildApk': same_apk,
+              'packaging': 'passed',
+              'privateRuntimeSource': 'implemented',
+              'emulatorStartup': 'passed' if passed else os.environ.get('STARTUP_OUTCOME', 'not_run'),
+              'networkEvidence': report.get('network', {'instrumented': False}),
+              'realHostPairing': 'not_run',
+              'phoneAndClashMi': 'not_run',
+              'scope': 'Startup and local invalid-offer interaction only; no Metro, host, provider, tailnet or account credentials.',
+          }
+          (candidate / 'ACCEPTANCE.json').write_text(json.dumps(state, indent=2) + '\n')
+          (candidate / 'ACCEPTANCE.txt').write_text(
+              f"Status: {state['status']}\nAPK SHA-256: {digest}\n"
+              f"Unchanged build APK: {same_apk}\n"
+              'Private runtime source is implemented. Emulator startup result is in emulator/report.json.\n'
+              'Network evidence covers only app-UID IP packet attempts during the recorded window.\n'
+              'It does not prove all JavaScript/native API invocations, delegated DNS or other UIDs.\n'
+              'Real-host pairing, provider execution, phone and Clash Mi acceptance have not run.\n')
+          with Path(os.environ['GITHUB_STEP_SUMMARY']).open('a') as summary:
+              summary.write(f"## Private Android candidate\n\nStatus: {state['status']}\n\nSHA-256: `{digest}`\n\n")
+              summary.write('The final artifact contains the unchanged signed build APK and scoped emulator evidence. Real-host and phone acceptance remain pending.\n')
+          if not same_apk:
+              raise SystemExit('The candidate APK differs from the signed build artifact.')
+          PY
+
+      - name: Upload the same APK and emulator evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: private-android-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ env.CANDIDATE_DIR }}
+          if-no-files-found: error
+          retention-days: 14

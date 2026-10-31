@@ -20,6 +20,7 @@
         "@openbot/contracts": "workspace:*",
         "@openbot/i18n": "workspace:*",
         "@openbot/logging": "workspace:*",
+        "@openbot/private-access": "workspace:*",
         "@openbot/team-client": "workspace:*",
         "@openbot/telemetry": "workspace:*",
         "@openbot/ui": "workspace:*",
@@ -127,6 +128,7 @@
         "@openbot/contracts": "workspace:*",
         "@openbot/i18n": "workspace:*",
         "@openbot/logging": "workspace:*",
+        "@openbot/private-access": "workspace:*",
         "@openbot/team-client": "workspace:*",
         "@openbot/telemetry": "workspace:*",
         "@openbot/user-errors": "workspace:*",
@@ -285,6 +287,18 @@
       "devDependencies": {
         "typescript": "catalog:",
         "vitest": "catalog:",
+      },
+    },
+    "packages/private-access": {
+      "name": "@openbot/private-access",
+      "version": "0.0.0",
+      "dependencies": {
+        "@openbot/contracts": "workspace:*",
+        "effect": "catalog:",
+      },
+      "devDependencies": {
+        "@types/node": "catalog:",
+        "typescript": "catalog:",
       },
     },
     "packages/team-client": {
@@ -1035,6 +1049,8 @@
     "@openbot/logging": ["@openbot/logging@workspace:packages/logging"],
 
     "@openbot/mobile": ["@openbot/mobile@workspace:apps/mobile"],
+
+    "@openbot/private-access": ["@openbot/private-access@workspace:packages/private-access"],
 
     "@openbot/remote-api": ["@openbot/remote-api@workspace:remote/api"],
 

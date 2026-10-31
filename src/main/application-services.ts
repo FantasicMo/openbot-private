@@ -448,6 +448,7 @@ const TEARDOWN_ORDER = {
   // After the connections that hold it.
   signalIngress: 86,
   host: 90,
+  privateAccess: 89,
   teamWebRtcBridge: 100,
   // Before the agent service, so no handoff is sent to an agent while the service stops.
   routineFlows: 103,
@@ -585,6 +586,7 @@ export interface ApplicationServices {
   agentInitialization: AgentInitializationGate<AgentLifecycleFailed>;
   sidebarLayout: SidebarLayoutStore;
   host: HostService;
+  privateAccess: PrivateAccessHostService | null;
   remoteDesktop: RemoteDesktopManager;
   remoteServers: RemoteServerManager;
   /** Null in a local server, in server mode and on a hosted server. */
@@ -949,6 +951,7 @@ export async function createApplicationServices({
     app.isPackaged ? "https://api.openbot.run" : "http://127.0.0.1:3100",
   );
   const centralAuth = new CentralAuthManager({
+    enabled: !PRIVATE_BUILD,
     apiUrl: centralAuthApiUrl,
     mobileConnectApiUrl: readMobileConnectApiUrl(process.env.OPENBOT_MOBILE_AUTH_API_URL, centralAuthApiUrl),
     storagePath: join(app.getPath("userData"), CENTRAL_AUTH_FILE),
@@ -957,13 +960,15 @@ export async function createApplicationServices({
   // Registered before `initialize()`, which publishes `{ status: "loading" }` synchronously: the
   // listener therefore runs on the next line with most of this function's services still unbuilt.
   teardown.push(TEARDOWN_ORDER.centralAuth, "the account runtime", () => Effect.runPromise(centralAuth.dispose()));
-  centralAuth.on("changed", forwardCentralAuth);
-  const centralAuthInitialization = Effect.runSync(Effect.cached(centralAuth.initialize().pipe(toRemoteWorkflowError)));
+  if (!PRIVATE_BUILD) centralAuth.on("changed", forwardCentralAuth);
+  const centralAuthInitialization = PRIVATE_BUILD
+    ? Effect.succeed<CentralAuthState>({ status: "signed_out" })
+    : Effect.runSync(Effect.cached(centralAuth.initialize().pipe(toRemoteWorkflowError)));
   void Effect.runPromise(centralAuthInitialization).catch((error) =>
     logger.warn("The account did not initialize.", toLogValue(error)),
   );
 
-  let profileRefreshActive = true;
+  let profileRefreshActive = !PRIVATE_BUILD;
   let profileRefreshing = false;
   let profileRefreshAgain = false;
   const refreshAccountProfile = async () => {
@@ -989,6 +994,7 @@ export async function createApplicationServices({
   };
   const startProfileTimer = () => {
     stopProfileTimer();
+    if (PRIVATE_BUILD) return;
     profileTimer = setInterval(() => void refreshAccountProfile(), REMOTE_ACCOUNT_CHECK_INTERVAL_MS);
     profileTimer.unref();
   };
@@ -1012,7 +1018,12 @@ export async function createApplicationServices({
     homedir(),
     new OpenBotDatabase(app.getPath("userData")),
     () => agentDefaults.get(),
-    localServerChild?.agentRoot,
+    localServerChild?.agentRoot ??
+      (PRIVATE_BUILD
+        ? app.isPackaged && app.commandLine.getSwitchValue("user-data-dir").trim() === ""
+          ? join(homedir(), "OpenBot Private")
+          : join(app.getPath("userData"), "workspaces")
+        : undefined),
   );
   // Phase marks for `dev:bench`, so a slow start shows which group of awaits it waited on. They
   // change nothing.
@@ -2089,6 +2100,15 @@ export async function createApplicationServices({
     join(app.getPath("userData"), TEAM_FILE),
   );
   await runCauseEffect(teamStore.initialize());
+  if (PRIVATE_BUILD)
+    await Effect.runPromise(
+      ensurePrivateOwner({
+        directory: app.getPath("userData"),
+        serverName: app.getName(),
+        store: teamStore,
+        cipher: secretCipher,
+      }),
+    );
   performance.mark("openbot:services.team");
   const machineAlertStore = new MachineAlertPreferenceStore(
     join(app.getPath("userData"), MACHINE_ALERTS_PREFERENCE_FILE),
@@ -2208,7 +2228,7 @@ export async function createApplicationServices({
     app.isPackaged && process.platform === "linux" ? await runCauseEffect(readInstallationMode()) : null;
   const hostRelease = new HostReleaseService({
     currentVersion: app.getVersion(),
-    packaged: app.isPackaged,
+    packaged: app.isPackaged && !PRIVATE_BUILD,
     platform: process.platform,
     arch: process.arch,
     environment: process.env,
@@ -2312,6 +2332,7 @@ export async function createApplicationServices({
   const pushNotificationStore = new PushNotificationStore(join(app.getPath("userData"), PUSH_NOTIFICATION_FILE));
   await runCauseEffect(pushNotificationStore.load());
   const host = new HostService({
+    ...(PRIVATE_BUILD ? ({ identityAuthority: "local", directoryAuthority: "local" } as const) : {}),
     appVersion: app.getVersion(),
     store: teamStore,
     agents: service,
@@ -2443,14 +2464,23 @@ export async function createApplicationServices({
       ensureToolRuntimesReady: () => providerRuntimes.ensureToolRuntimesReady(),
       toolRuntimes: () => providerRuntimes.mcpToolRuntimes(),
     },
-    teamWebRtcBridge,
-    privateNetwork: () => remoteNetworkRoute.get().route === "private",
-    registerRemoteHost: (input) => centralAuth.registerRemoteHost(input).pipe(toRemoteWorkflowError),
-    handOverRemoteHostKey: (hostId, handover) =>
-      centralAuth.handOverRemoteHostKey(hostId, handover).pipe(toRemoteWorkflowError),
-    issueRemoteHostTicket: (hostId) => centralAuth.issueRemoteHostTicket(hostId).pipe(toRemoteWorkflowError),
-    sendLiveActivityPush: (hostId, push) => centralAuth.sendLiveActivityPush(hostId, push).pipe(toRemoteWorkflowError),
-    sendPushNotification: (hostId, push) => centralAuth.sendPushNotification(hostId, push).pipe(toRemoteWorkflowError),
+    teamWebRtcBridge: PRIVATE_BUILD ? undefined : teamWebRtcBridge,
+    privateNetwork: () => PRIVATE_BUILD || remoteNetworkRoute.get().route === "private",
+    registerRemoteHost: PRIVATE_BUILD
+      ? undefined
+      : (input) => centralAuth.registerRemoteHost(input).pipe(toRemoteWorkflowError),
+    handOverRemoteHostKey: PRIVATE_BUILD
+      ? undefined
+      : (hostId, handover) => centralAuth.handOverRemoteHostKey(hostId, handover).pipe(toRemoteWorkflowError),
+    issueRemoteHostTicket: PRIVATE_BUILD
+      ? undefined
+      : (hostId) => centralAuth.issueRemoteHostTicket(hostId).pipe(toRemoteWorkflowError),
+    sendLiveActivityPush: PRIVATE_BUILD
+      ? undefined
+      : (hostId, push) => centralAuth.sendLiveActivityPush(hostId, push).pipe(toRemoteWorkflowError),
+    sendPushNotification: PRIVATE_BUILD
+      ? undefined
+      : (hostId, push) => centralAuth.sendPushNotification(hostId, push).pipe(toRemoteWorkflowError),
     pushNotificationStore,
     // The owner is at this computer only with recent input, also when the window was left in focus.
     // Then the focused window shows the event, or the desktop notifies. When mute or the level of
@@ -2471,19 +2501,36 @@ export async function createApplicationServices({
         agentNotificationLevels.levels(OWNER_NOTIFICATION_KEY),
       );
     },
-    verifyRemoteSessionTicket: (ticket) => centralAuth.verifyRemoteSessionTicket(ticket).pipe(toRemoteWorkflowError),
-    endRemoteSession: (sessionId) => centralAuth.endRemoteSession(sessionId).pipe(toRemoteWorkflowError),
-    remoteControlPlaneUrl: centralAuth.resolveApiUrl("/"),
-    createRemoteInvite: (hostId, input) => centralAuth.createRemoteInvite(hostId, input).pipe(toRemoteWorkflowError),
-    listRemoteInvites: (hostId) => centralAuth.listRemoteInvites(hostId).pipe(toRemoteWorkflowError),
-    revokeRemoteInvite: (inviteId) => centralAuth.revokeRemoteInvite(inviteId).pipe(toRemoteWorkflowError),
-    listRemoteMembers: (hostId) => centralAuth.listRemoteMembers(hostId).pipe(toRemoteWorkflowError),
-    updateRemoteMember: (hostId, membershipId, role, reactivate) =>
-      centralAuth.updateRemoteMember(hostId, membershipId, role, reactivate).pipe(toRemoteWorkflowError),
-    removeRemoteMember: (hostId, membershipId) =>
-      centralAuth.removeRemoteMember(hostId, membershipId).pipe(toRemoteWorkflowError),
-    updateRemoteHostLogo: (hostId, image, version) =>
-      centralAuth.updateRemoteHostLogo(hostId, image, version).pipe(toRemoteWorkflowError),
+    verifyRemoteSessionTicket: PRIVATE_BUILD
+      ? undefined
+      : (ticket) => centralAuth.verifyRemoteSessionTicket(ticket).pipe(toRemoteWorkflowError),
+    endRemoteSession: PRIVATE_BUILD
+      ? undefined
+      : (sessionId) => centralAuth.endRemoteSession(sessionId).pipe(toRemoteWorkflowError),
+    remoteControlPlaneUrl: PRIVATE_BUILD ? undefined : centralAuth.resolveApiUrl("/"),
+    createRemoteInvite: PRIVATE_BUILD
+      ? undefined
+      : (hostId, input) => centralAuth.createRemoteInvite(hostId, input).pipe(toRemoteWorkflowError),
+    listRemoteInvites: PRIVATE_BUILD
+      ? undefined
+      : (hostId) => centralAuth.listRemoteInvites(hostId).pipe(toRemoteWorkflowError),
+    revokeRemoteInvite: PRIVATE_BUILD
+      ? undefined
+      : (inviteId) => centralAuth.revokeRemoteInvite(inviteId).pipe(toRemoteWorkflowError),
+    listRemoteMembers: PRIVATE_BUILD
+      ? undefined
+      : (hostId) => centralAuth.listRemoteMembers(hostId).pipe(toRemoteWorkflowError),
+    updateRemoteMember: PRIVATE_BUILD
+      ? undefined
+      : (hostId, membershipId, role, reactivate) =>
+          centralAuth.updateRemoteMember(hostId, membershipId, role, reactivate).pipe(toRemoteWorkflowError),
+    removeRemoteMember: PRIVATE_BUILD
+      ? undefined
+      : (hostId, membershipId) => centralAuth.removeRemoteMember(hostId, membershipId).pipe(toRemoteWorkflowError),
+    updateRemoteHostLogo: PRIVATE_BUILD
+      ? undefined
+      : (hostId, image, version) =>
+          centralAuth.updateRemoteHostLogo(hostId, image, version).pipe(toRemoteWorkflowError),
     localDevelopmentHost: developmentRemoteRole === "host",
     logDirectory: join(app.getPath("userData"), "logs", "remote"),
     removeLegacyRemoteDesktopCredential: () =>
@@ -2497,9 +2544,12 @@ export async function createApplicationServices({
     // Still a function, and still throws when nobody is signed in: the account is a lifetime
     // state of the running app, not a startup-ordering artifact.
     getSignedInUser: () => centralAuth.getSignedInUser(),
-    redeemCentralTicket: (ticket, serverId) =>
-      centralAuth.redeemTeamAuthTicket(ticket, serverId).pipe(toRemoteWorkflowError),
-    sendTeamInviteEmail: (input) => centralAuth.sendTeamInviteEmail(input).pipe(toRemoteWorkflowError),
+    redeemCentralTicket: PRIVATE_BUILD
+      ? undefined
+      : (ticket, serverId) => centralAuth.redeemTeamAuthTicket(ticket, serverId).pipe(toRemoteWorkflowError),
+    sendTeamInviteEmail: PRIVATE_BUILD
+      ? undefined
+      : (input) => centralAuth.sendTeamInviteEmail(input).pipe(toRemoteWorkflowError),
     platform: process.platform === "darwin" || process.platform === "win32" ? process.platform : "linux",
     unattended: false,
     remoteDesktopRuntimePaths: remoteDesktopRuntime,
@@ -2543,7 +2593,8 @@ export async function createApplicationServices({
       Effect.try({
         try: () => {
           // The private route has no relay, so the remote desktop also connects only over a direct path.
-          if (developmentRemoteRole === "host" || remoteNetworkRoute.get().route === "private") return [];
+          if (PRIVATE_BUILD || developmentRemoteRole === "host" || remoteNetworkRoute.get().route === "private")
+            return [];
           const identity = teamStore.getIdentity();
           if (!identity) throw new Error(sourceText("error.app.remoteIdentityUnavailable"));
           const iceServers = teamWebRtcBridge.getIceServers(identity.serverId);
@@ -2554,8 +2605,15 @@ export async function createApplicationServices({
       }),
   });
   teardown.push(TEARDOWN_ORDER.host, "the local host", () => runCauseEffect(host.shutdown()));
+  const privateAccess = PRIVATE_BUILD
+    ? new PrivateAccessHostService({ directory: app.getPath("userData"), store: teamStore, host })
+    : null;
+  if (privateAccess) {
+    teardown.push(TEARDOWN_ORDER.privateAccess, "private access", () => Effect.runPromise(privateAccess.shutdown()));
+    await Effect.runPromise(privateAccess.initialize());
+  }
   const signedInState = centralAuth.getState();
-  if (localServerChild) {
+  if (localServerChild || PRIVATE_BUILD) {
     // A local server has no account. Its owner is a password member, and binding an account here
     // would unbind that host.
   } else if (signedInState.status === "signed_in") {
@@ -2581,7 +2639,8 @@ export async function createApplicationServices({
         : resolve(__dirname, "../../resources/plugin-catalog"),
     ),
   );
-  const analyticsEnabled = (app.isPackaged && appVariant === "production") || analyticsCaptureUrl !== null;
+  const analyticsEnabled =
+    !PRIVATE_BUILD && ((app.isPackaged && appVariant === "production") || analyticsCaptureUrl !== null);
   const failureReports = analyticsEnabled
     ? new ReportQueue(
         fileReportStorage(join(app.getPath("userData"), "openbot-error-reports-v1.json")),
@@ -2615,7 +2674,7 @@ export async function createApplicationServices({
     ...(failureReports ? { reports: failureReports } : {}),
     enabled: analyticsEnabled,
     ...(analyticsCaptureUrl ? { apiUrl: analyticsCaptureUrl } : {}),
-    trackingEnabled: analyticsPreference.enabled,
+    trackingEnabled: !PRIVATE_BUILD && analyticsPreference.enabled,
     appVersion: app.getVersion(),
     platform: analyticsPlatform,
     // A function for a lifetime reason, not an ordering one: the signed-in account changes
@@ -2669,7 +2728,7 @@ export async function createApplicationServices({
   const analyticsPreferences = new AnalyticsPreferenceService({
     path: analyticsPreferenceFile,
     account: centralAuth,
-    setTrackingEnabled: (enabled) => analytics.setTrackingEnabled(enabled),
+    setTrackingEnabled: (enabled) => analytics.setTrackingEnabled(!PRIVATE_BUILD && enabled),
     followed: (enabled) => {
       for (const window of BrowserWindow.getAllWindows())
         sendToRenderer(window, IPC_ENDPOINTS.app.analyticsPreference, { enabled });
@@ -2711,29 +2770,32 @@ export async function createApplicationServices({
         wake: (serverId) => hostedServers.wake(serverId),
         status: (serverId) => hostedServers.status(serverId),
       },
-      webrtcTransport: new TeamWebRtcClientTransport({
-        bridge: teamWebRtcBridge,
-        listHosts: () => centralAuth.listRemoteHosts(),
-        startSession: (hostId) => centralAuth.startRemoteSession(hostId),
-        issueTicket: (sessionId, clientPublicKey) => centralAuth.issueRemoteSessionTicket(sessionId, clientPublicKey),
-        endSession: (sessionId) => centralAuth.endRemoteSession(sessionId),
-        createInvite: (hostId, input) => centralAuth.createRemoteInvite(hostId, input),
-        listInvites: (hostId) => centralAuth.listRemoteInvites(hostId),
-        previewInvite: (token) => centralAuth.previewRemoteInvite(token),
-        acceptInvite: (token) => centralAuth.acceptRemoteInvite(token),
-        revokeInvite: (inviteId) => centralAuth.revokeRemoteInvite(inviteId),
-        listMembers: (hostId) => centralAuth.listRemoteMembers(hostId),
-        updateMember: (hostId, membershipId, role, reactivate) =>
-          centralAuth.updateRemoteMember(hostId, membershipId, role, reactivate),
-        removeMember: (hostId, membershipId) => centralAuth.removeRemoteMember(hostId, membershipId),
-        removeOwnedHost: (hostId) => centralAuth.removeOwnedRemoteHost(hostId),
-        getPrincipalId: () => centralAuth.getSignedInUser().id,
-        controlPlaneUrl: centralAuth.resolveApiUrl("/"),
-        downloadHostLogo: (hostId, version) => centralAuth.downloadRemoteHostLogo(hostId, version),
-        transferDirectory: join(app.getPath("userData"), "remote-transfers"),
-        connectTrace,
-        sessionCache: remoteSessionCache,
-      }),
+      webrtcTransport: PRIVATE_BUILD
+        ? undefined
+        : new TeamWebRtcClientTransport({
+            bridge: teamWebRtcBridge,
+            listHosts: () => centralAuth.listRemoteHosts(),
+            startSession: (hostId) => centralAuth.startRemoteSession(hostId),
+            issueTicket: (sessionId, clientPublicKey) =>
+              centralAuth.issueRemoteSessionTicket(sessionId, clientPublicKey),
+            endSession: (sessionId) => centralAuth.endRemoteSession(sessionId),
+            createInvite: (hostId, input) => centralAuth.createRemoteInvite(hostId, input),
+            listInvites: (hostId) => centralAuth.listRemoteInvites(hostId),
+            previewInvite: (token) => centralAuth.previewRemoteInvite(token),
+            acceptInvite: (token) => centralAuth.acceptRemoteInvite(token),
+            revokeInvite: (inviteId) => centralAuth.revokeRemoteInvite(inviteId),
+            listMembers: (hostId) => centralAuth.listRemoteMembers(hostId),
+            updateMember: (hostId, membershipId, role, reactivate) =>
+              centralAuth.updateRemoteMember(hostId, membershipId, role, reactivate),
+            removeMember: (hostId, membershipId) => centralAuth.removeRemoteMember(hostId, membershipId),
+            removeOwnedHost: (hostId) => centralAuth.removeOwnedRemoteHost(hostId),
+            getPrincipalId: () => centralAuth.getSignedInUser().id,
+            controlPlaneUrl: centralAuth.resolveApiUrl("/"),
+            downloadHostLogo: (hostId, version) => centralAuth.downloadRemoteHostLogo(hostId, version),
+            transferDirectory: join(app.getPath("userData"), "remote-transfers"),
+            connectTrace,
+            sessionCache: remoteSessionCache,
+          }),
     },
   );
   // A server joined or revoked on another device of this account. Signal carries it to every socket
@@ -2745,7 +2807,7 @@ export async function createApplicationServices({
   performance.mark("openbot:services.plugin-catalog");
   // Not on a server: a local server is a workspace of the desktop app.
   const localServers =
-    localServerChild || serverModeEnvironment || hostedServer
+    PRIVATE_BUILD || localServerChild || serverModeEnvironment || hostedServer
       ? null
       : new LocalServers({
           registryPath: join(app.getPath("userData"), LOCAL_SERVERS_FILE),
@@ -2902,6 +2964,7 @@ export async function createApplicationServices({
       existsSync(HOSTED_UPDATE_TRIGGER));
   // A local server is the same application as its parent, which installs the update for both.
   const updatesEnabled =
+    !PRIVATE_BUILD &&
     !localServerChild &&
     app.isPackaged &&
     !isNixStoreInstall() &&
@@ -3109,7 +3172,7 @@ export async function createApplicationServices({
     teardown.push(TEARDOWN_ORDER.hostedServerActivity, "the hosted server activity report", () =>
       Effect.runPromise(hostedServerActivity.stop()),
     );
-  } else if (!serverModeEnvironment && !localServerChild) {
+  } else if (!PRIVATE_BUILD && !serverModeEnvironment && !localServerChild) {
     // A server that was published at the last quit is published again at launch, once (`index.ts`).
     // That start can fail when the network is not ready yet, such as at login after an update, and
     // the server then stayed private until the user published it again. A published server that a
@@ -3166,9 +3229,9 @@ export async function createApplicationServices({
     });
   }
   performance.mark("openbot:services.updates");
-  await runCauseEffect(hostUpdateCoordinator.tick());
+  if (!PRIVATE_BUILD) await runCauseEffect(hostUpdateCoordinator.tick());
   performance.mark("openbot:services.host-update");
-  hostUpdateCoordinator.start();
+  if (!PRIVATE_BUILD) hostUpdateCoordinator.start();
   teardown.push(TEARDOWN_ORDER.hostUpdateCoordinator, "the host update coordinator", () =>
     Effect.runPromise(hostUpdateCoordinator.stop()),
   );
@@ -3230,6 +3293,7 @@ export async function createApplicationServices({
     describeRestartReadiness,
     sidebarLayout,
     host,
+    privateAccess,
     remoteDesktop,
     remoteServers,
     localServers,
@@ -3270,3 +3334,7 @@ export async function createApplicationServices({
     centralAuthInitialization,
   };
 }
+
+import { PRIVATE_BUILD } from "./private-access-build";
+import { PrivateAccessHostService } from "./private-access-host";
+import { ensurePrivateOwner } from "./private-access-owner";

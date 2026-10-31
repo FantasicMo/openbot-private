@@ -27,6 +27,9 @@ import {
   updateMobileProfile,
   validateMobileSession,
 } from "@/features/auth/api/mobile-auth";
+import { PrivateAccessProvider, usePrivateAccess } from "@/features/private-access/private-access-context";
+import { isPrivateBuild } from "@/features/private-access/private-build";
+import { PrivateMobileError } from "@/features/private-access/private-contracts";
 import { deleteAgentAvatars } from "@/features/workspace/model/agent-avatar-cache";
 import { type QueryScope, queryKeys } from "@/features/workspace/model/query-keys";
 import { queryClient } from "@/shared/lib/query-client";
@@ -51,6 +54,44 @@ interface MobileSessionContextValue {
 const MobileSessionContext = createContext<MobileSessionContextValue | null>(null);
 
 export function MobileSessionProvider({ children }: PropsWithChildren) {
+  return isPrivateBuild ? (
+    <PrivateAccessProvider>
+      <PrivateSessionProvider>{children}</PrivateSessionProvider>
+    </PrivateAccessProvider>
+  ) : (
+    <OfficialMobileSessionProvider>{children}</OfficialMobileSessionProvider>
+  );
+}
+
+function PrivateSessionProvider({ children }: PropsWithChildren) {
+  const access = usePrivateAccess();
+  if (!access) throw new Error("PrivateSessionProvider requires PrivateAccessProvider.");
+  const unavailable = async (): Promise<never> => {
+    throw new PrivateMobileError("unsupported");
+  };
+  // Official consumers see no account. No account provider or its effects are mounted.
+  return (
+    <MobileSessionContext.Provider
+      value={{
+        loading: access.loading,
+        session: null,
+        sessionScope: 0,
+        refreshProfile: unavailable,
+        handleSessionError: () => undefined,
+        connect: () => {
+          throw new PrivateMobileError("unsupported");
+        },
+        signOut: unavailable,
+        updateProfile: unavailable,
+        sendAnalyticsChoice: unavailable,
+      }}
+    >
+      {children}
+    </MobileSessionContext.Provider>
+  );
+}
+
+function OfficialMobileSessionProvider({ children }: PropsWithChildren) {
   const [sessionState, setSessionState] = useState<MobileSession | null | undefined>(undefined);
   const sessionRef = useRef<MobileSession | null>(null);
   const sessionScope = useRef(0);
@@ -209,5 +250,8 @@ export function useMobileSession(): MobileSessionContextValue {
 /** The account part of the query keys (`queryKeys`). */
 export function useQueryScope(): QueryScope {
   const { session, sessionScope } = useMobileSession();
+  const access = usePrivateAccess();
+  if (access && !access.loading && !access.error)
+    return ["https://private-device.invalid", access.store.state().deviceId, 0];
   return [session?.apiUrl, session?.user.id, sessionScope];
 }

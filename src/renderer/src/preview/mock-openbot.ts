@@ -77,6 +77,7 @@ import {
   DEFAULT_EXTERNAL_LINK_PREFERENCE,
   DEFAULT_MACHINE_ALERT_SETTINGS,
   DEFAULT_MEMORY_REVIEW_INTERVAL,
+  DEFAULT_PRIVATE_GATEWAY_PORT,
   DEFAULT_PROMPT_CACHE_TTL,
   DEFAULT_PROVIDER_ACCOUNT_ID,
   DEFAULT_PROVIDER_DETECTION_SETTINGS,
@@ -114,6 +115,7 @@ import {
   type OpenSharedFileInput,
   type OpenWorkspaceFileInput,
   PLAN_CONTINUATION_ITEM_TYPE,
+  type PrivateAccessStatus,
   type PromptCacheTtlSetting,
   type ProviderAccountStatus,
   type ProviderDetectionSettings,
@@ -401,7 +403,22 @@ const MOCK_MCP_TOOL_COUNTS: Record<string, number> = { "Local SQLite": 12, Linea
 const MOCK_MCP_SIGN_IN_URL = "https://mcp.granola.ai/mcp";
 
 export function createMockOpenBot(options: MockOpenBotOptions = {}): MockOpenBotControls {
-  const appInfo = clone(options.appInfo ?? STORY_APP_INFO);
+  const appInfo = clone<AppInfo>(options.appInfo ?? STORY_APP_INFO);
+  let privateAccessStatus: PrivateAccessStatus = {
+    enabled: appInfo.privateBuild === true,
+    phase: "local-only",
+    hostId: appInfo.privateBuild ? "preview-private-host" : null,
+    hostName: appInfo.privateBuild ? "OpenBot Private" : null,
+    publicOrigin: null,
+    gatewayPort: appInfo.privateBuild ? DEFAULT_PRIVATE_GATEWAY_PORT : null,
+    devices: [],
+    errorCode: null,
+  };
+  const privateAccessListeners = new Set<(status: PrivateAccessStatus) => void>();
+  const changedPrivateAccess = () => {
+    for (const listener of privateAccessListeners) listener(clone(privateAccessStatus));
+    return clone(privateAccessStatus);
+  };
   let setupState = clone<AppSetupState>(
     options.setupState ?? { completed: true, preferredProvider: "codex", preferredModel: null },
   );
@@ -1068,6 +1085,53 @@ export function createMockOpenBot(options: MockOpenBotOptions = {}): MockOpenBot
   const billingPlans = previewBillingServers();
 
   const api: OpenBotDesktopApi = {
+    privateAccess: {
+      status: async () => clone(privateAccessStatus),
+      configure: async (input) => {
+        privateAccessStatus = {
+          ...privateAccessStatus,
+          publicOrigin: input.publicOrigin,
+          gatewayPort: input.gatewayPort,
+          phase: input.publicOrigin ? "ready" : "local-only",
+        };
+        return changedPrivateAccess();
+      },
+      createPairing: async () => {
+        if (!privateAccessStatus.publicOrigin) throw new Error("Configure a private origin in this preview first.");
+        return {
+          protocol: 1,
+          offerId: "preview-offer",
+          secret: "preview".padEnd(43, "x"),
+          expiresAt: new Date(Date.now() + 120_000).toISOString(),
+          publicOrigin: privateAccessStatus.publicOrigin,
+          hostId: "preview-private-host",
+          hostName: "OpenBot Private",
+          fingerprint: "preview-fingerprint",
+          publicKey: "preview-public-key",
+        };
+      },
+      revokeDevice: async ({ memberId }) => {
+        privateAccessStatus = {
+          ...privateAccessStatus,
+          devices: privateAccessStatus.devices.filter((device) => device.memberId !== memberId),
+        };
+        return changedPrivateAccess();
+      },
+      revokeSession: async ({ sessionId }) => {
+        privateAccessStatus = {
+          ...privateAccessStatus,
+          devices: privateAccessStatus.devices.map((device) => ({
+            ...device,
+            sessionIds: device.sessionIds.filter((id) => id !== sessionId),
+          })),
+        };
+        return changedPrivateAccess();
+      },
+      onChanged: (listener) => {
+        privateAccessListeners.add(listener);
+        return () => privateAccessListeners.delete(listener);
+      },
+    },
     getAppInfo: async () => clone(appInfo),
     getSetupState: async () => clone(setupState),
     saveSetup: async ({ preferredProvider, preferredModel }) => {

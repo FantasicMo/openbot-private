@@ -16,7 +16,7 @@ import { activeServerHasProviderSettings, serverCanAdminister } from "./features
 import { useServerSettings } from "./features/servers/server-settings";
 import { useServers } from "./features/servers/servers-context";
 import { useSettings } from "./features/settings/settings-context";
-import { dynamicIslandSettingsShown, navItems } from "./features/settings/settings-tabs";
+import { dynamicIslandSettingsShown, navItems, settingsTabShown } from "./features/settings/settings-tabs";
 import { useUsage } from "./features/usage/usage-context";
 import { useNavigation } from "./navigation";
 import { usePlatform } from "./platform";
@@ -150,7 +150,7 @@ export function useGlobalSearchSources(open: () => boolean) {
       }
       for (const item of navItems) {
         // Hosted servers shows only for an account with hosting, which the dialog checks when it opens.
-        if (item.value === "hosted-servers" || (item.value === "dynamic-island" && !dynamicIslandShown)) continue;
+        if (!settingsTabShown(item.value, dynamicIslandShown)) continue;
         list.push({
           id: `settings:${item.value}`,
           label: t(item.titleKey),

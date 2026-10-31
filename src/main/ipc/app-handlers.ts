@@ -173,6 +173,7 @@ export function appIpcHandlers({
           version,
           platform,
           variant: appVariant,
+          ...(PRIVATE_BUILD ? { privateBuild: true } : {}),
           ...(analyticsCaptureUrl ? { analyticsCaptureUrl } : {}),
         };
       }),
@@ -185,9 +186,10 @@ export function appIpcHandlers({
       // An answer the user gave on another device comes before the regional default.
       getAnalyticsDefault: handler(
         (): AnalyticsPreference => ({
-          enabled:
-            analyticsPreferences.accountAnswer() ??
-            analyticsOnByDefault(app.getLocaleCountryCode(), Intl.DateTimeFormat().resolvedOptions().timeZone),
+          enabled: PRIVATE_BUILD
+            ? false
+            : (analyticsPreferences.accountAnswer() ??
+              analyticsOnByDefault(app.getLocaleCountryCode(), Intl.DateTimeFormat().resolvedOptions().timeZone)),
         }),
       ),
       setAnalyticsPreference: payloadHandler(parseAnalyticsPreference, (parsed) =>
@@ -309,3 +311,5 @@ export function appIpcHandlers({
     },
   };
 }
+
+import { PRIVATE_BUILD } from "../private-access-build";

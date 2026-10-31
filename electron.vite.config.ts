@@ -4,9 +4,15 @@ import tailwindcss from "@tailwindcss/vite";
 import { defineConfig, externalizeDepsPlugin } from "electron-vite";
 
 const rendererPort = readRendererPort(process.env.OPENBOT_DEV_RENDERER_PORT);
+const privateBuild = process.env.OPENBOT_PRIVATE_BUILD === "1";
+const privateBuildDefines = {
+  "process.env.OPENBOT_PRIVATE_BUILD": JSON.stringify(privateBuild ? "1" : "0"),
+  "import.meta.env.VITE_OPENBOT_PRIVATE_BUILD": JSON.stringify(privateBuild ? "1" : "0"),
+};
 
 export default defineConfig({
   main: {
+    define: privateBuildDefines,
     // Workspace sources ship as TypeScript and must be bundled for the packaged app.
     plugins: [
       externalizeDepsPlugin({
@@ -15,6 +21,7 @@ export default defineConfig({
           "@openbot/contracts",
           "@openbot/i18n",
           "@openbot/logging",
+          "@openbot/private-access",
           "@openbot/team-client",
           "@openbot/telemetry",
           "@openbot/user-errors",
@@ -37,6 +44,7 @@ export default defineConfig({
     },
   },
   preload: {
+    define: privateBuildDefines,
     plugins: [externalizeDepsPlugin({ exclude: ["@openbot/contracts"] })],
     build: {
       rollupOptions: {
@@ -52,6 +60,7 @@ export default defineConfig({
     },
   },
   renderer: {
+    define: privateBuildDefines,
     plugins: [solidPlugin(), tailwindcss({ optimize: false })],
     optimizeDeps: {
       include: ["@norbert_bodziony/bloub"],

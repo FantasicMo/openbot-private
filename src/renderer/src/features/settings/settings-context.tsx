@@ -18,6 +18,7 @@ import { readSendShortcutMode, setSendShortcutMode, useSendShortcutMode } from "
 import { createSimpleContext } from "../../simple-context";
 import { useAuth } from "../account/account-context";
 import { useSetup } from "../onboarding/onboarding-context";
+import { PRIVATE_BUILD } from "../private-access/private-build";
 import { settingsPort } from "./settings-port";
 import { isOpenSettingsShortcut } from "./settings-shortcut";
 import type { SettingsTab } from "./settings-tabs";
@@ -164,6 +165,7 @@ const Settings = createSimpleContext({
         analyticsEnabled: analyticsPreferenceLoaded(),
       }),
       ({ info, setup, auth, analyticsEnabled }) => {
+        if (PRIVATE_BUILD) return;
         if (analyticsEnabled === null) return;
         if (landingPreview) return;
         desktopAnalytics.setTrackingEnabled(analyticsEnabled);

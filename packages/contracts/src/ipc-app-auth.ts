@@ -12,6 +12,8 @@ export interface AppInfo {
   version: string;
   platform: DesktopPlatform;
   variant: AppVariant;
+  /** Present only in a fork build whose local identity does not use the account service. */
+  privateBuild?: boolean;
   /** Set only in an unpackaged build that a local analytics capture server reads. */
   analyticsCaptureUrl?: string;
 }

@@ -619,6 +619,14 @@ function selectJoinedServer(server: ServerSummary): ServerSummary {
 }
 
 const openbotApi: OpenBotDesktopApi = {
+  privateAccess: bridgeGroup(IPC_ENDPOINTS.privateAccess, {
+    status: decodePrivateAccessStatus,
+    configure: decodePrivateAccessStatus,
+    createPairing: decodePrivateAccessPairing,
+    revokeDevice: decodePrivateAccessStatus,
+    revokeSession: decodePrivateAccessStatus,
+    changed: decodePrivateAccessStatus,
+  }),
   ...bridgeGroup(IPC_ENDPOINTS.app, {
     getAppInfo: decodeAppInfo,
     getSetupState: decodeAppSetupState,
@@ -1343,3 +1351,5 @@ const openbotApi: OpenBotDesktopApi = {
 };
 
 contextBridge.exposeInMainWorld("openbot", openbotApi);
+
+import { decodePrivateAccessPairing, decodePrivateAccessStatus } from "./private-access-decoding";

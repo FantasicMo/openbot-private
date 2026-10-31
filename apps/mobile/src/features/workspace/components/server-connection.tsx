@@ -5,13 +5,15 @@ import {
   type RemoteConnectionFailure,
   type RemoteConnectionStage,
   type RemoteRecoveryStatus,
-  type RemoteTeamDirectoryClient,
   remoteConnectionFailureDetails,
 } from "@openbot/team-client";
 import { REMOTE_PEER_LOST_AFTER_MS, type RemoteTeamConnectionUpdate } from "@openbot/team-client/remote-peer";
 import { memo, useCallback, useEffect, useRef, useState } from "react";
 import { MobileConnectionAnalytics } from "@/features/analytics/connection";
 import { mobileAnalytics } from "@/features/analytics/mobile-analytics";
+import { isPrivateBuild } from "@/features/private-access/private-build";
+import type { MobileDirectoryPort } from "@/features/private-access/private-ports";
+import { PrivateTeamTransport } from "@/features/private-access/private-team-transport";
 import { supportLog, supportLogValue } from "@/features/support/model/support-log";
 import { referencedError } from "@/features/workspace/model/referenced-error";
 import { RemoteTeamTransport, type RemoteTeamTransportRef } from "./remote-team-transport";
@@ -47,7 +49,7 @@ interface Props {
   hostId: string;
   publicKey: string;
   active: boolean;
-  directory: RemoteTeamDirectoryClient;
+  directory: MobileDirectoryPort;
   register(hostId: string, handle: ServerConnectionHandle | null): void;
   load(hostId: string, publicKey: string, client: RemoteTeamTransportRef, context: ServerLoadContext): Promise<void>;
   /** `resuming` is true while a return to the app connects again in its quiet time. */
@@ -226,7 +228,8 @@ export const ServerConnection = memo(function ServerConnection({
       // After this long the peer replaces its connection when it becomes active, so the first attempt
       // shows that it connects instead of an online server whose requests fail. In the quiet time
       // the server still shows online, and its requests wait for the new connection.
-      if (Date.now() - inactiveSince.current >= REMOTE_PEER_LOST_AFTER_MS) controller.current?.offline();
+      if (isPrivateBuild || Date.now() - inactiveSince.current >= REMOTE_PEER_LOST_AFTER_MS)
+        controller.current?.offline();
       inactiveSince.current = null;
     }
     controller.current?.setActive(active);
@@ -240,6 +243,15 @@ export const ServerConnection = memo(function ServerConnection({
     }
   }, [active, hostId, onMembershipChanged, analytics, endResume]);
 
+  if (isPrivateBuild)
+    return (
+      <PrivateTeamTransport
+        ref={attach}
+        hostId={hostId}
+        active={active}
+        events={{ connection: handleConnectionUpdate, event: onTeamEvent }}
+      />
+    );
   return (
     <RemoteTeamTransport
       ref={attach}

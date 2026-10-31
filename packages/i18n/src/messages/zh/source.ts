@@ -12,6 +12,7 @@ import { messages as errorKind } from "./error/kind";
 import { messages as errorMarketplace } from "./error/marketplace";
 import { messages as errorMcp } from "./error/mcp";
 import { messages as errorMessaging } from "./error/messaging";
+import { messages as errorPrivateAccess } from "./error/privateAccess";
 import { messages as errorProvider } from "./error/provider";
 import { messages as errorReference } from "./error/reference";
 import { messages as errorRemote } from "./error/remote";
@@ -42,6 +43,7 @@ export const source = {
   ...errorRemote,
   ...errorAgent,
   ...errorProvider,
+  ...errorPrivateAccess,
   ...errorComputerUse,
   ...errorVoice,
   ...errorWorkflow,

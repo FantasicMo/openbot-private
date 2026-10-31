@@ -10,8 +10,10 @@ import {
   useSyncExternalStore,
 } from "react";
 import { reportMobileNotification } from "@/features/analytics/failure-reports";
-import { useMobileSession } from "@/features/auth/context/mobile-session-context";
 import { ChannelHistoryRefreshError } from "@/features/channels/model/channel-store";
+import { useMobileWorkspaceAccess } from "@/features/private-access/mobile-workspace-access";
+import { isPrivateBuild } from "@/features/private-access/private-build";
+import { cancelPrivateUpload } from "@/features/private-access/private-team-transport";
 import { donateShareTarget } from "@/features/share/model/share-extension";
 import { useMobileWorkspace } from "@/features/workspace/context/mobile-workspace-context";
 import type { MobileWorkspaceContextValue } from "@/features/workspace/model/workspace-types";
@@ -52,6 +54,9 @@ function createAccountOutbox(scope: string | null): AccountOutbox {
       return errorMessage(error, t("mobile.chat.outbox.failed"));
     },
     reportFailure: (error) => reportMobileNotification({ code: classifyFailure(error) }, "turn", "banner"),
+    cancelTransfer: isPrivateBuild
+      ? (message) => cancelPrivateUpload(message.target.serverId, message.clientMessageId)
+      : undefined,
     randomId: Crypto.randomUUID,
   });
   return { store, workspace };
@@ -74,9 +79,9 @@ function accountOutbox(scope: string | null): AccountOutbox {
  */
 export function OutboxProvider({ children }: PropsWithChildren) {
   const workspace = useMobileWorkspace();
-  const { session } = useMobileSession();
+  const access = useMobileWorkspaceAccess();
   const [{ store, workspace: current }] = useState(() =>
-    accountOutbox(session ? `${session.apiUrl}:${session.user.id}` : null),
+    accountOutbox(access ? `${access.namespace}:${access.identityId}` : null),
   );
   current.current = workspace;
   const onlineKey = workspace.servers
@@ -114,7 +119,8 @@ async function deliverOutboxMessage(
     const repeatSafe = workspace.canRetryMessage(target.serverId);
     const messageId = await uploadChatAttachments(delivery.files, {
       ...control,
-      upload: (file, onProgress) => workspace.uploadAttachment(target.agentId, file, target.serverId, onProgress),
+      upload: (file, onProgress) =>
+        workspace.uploadAttachment(target.agentId, file, target.serverId, onProgress, message.clientMessageId),
       discard: (id) => workspace.discardAttachment(target.agentId, id, target.serverId),
       send: async (ids) => {
         await delivery.beforeStore(repeatSafe);
@@ -129,13 +135,13 @@ async function deliverOutboxMessage(
       },
     });
     const agent = workspace.agents.find((item) => item.serverId === target.serverId && item.id === target.agentId);
-    if (agent) donateShareTarget(agent.serverId, agent.id, agent.name);
+    if (agent && !isPrivateBuild) donateShareTarget(agent.serverId, agent.id, agent.name);
     return { messageId };
   }
   const { channelStore } = workspace;
   await uploadChatAttachments(delivery.files, {
     ...control,
-    upload: (file, onProgress) => channelStore.upload(target.serverId, file, onProgress),
+    upload: (file, onProgress) => channelStore.upload(target.serverId, file, onProgress, message.clientMessageId),
     discard: (id) => channelStore.discard(target.serverId, id),
     send: async (ids) => {
       // The host keeps the receipt of a channel operation with the channel, so a repeat is always safe.

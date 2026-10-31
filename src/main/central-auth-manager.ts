@@ -72,6 +72,8 @@ interface CentralAuthEvents {
 type AuthFetcher = (input: string | URL | Request, init?: RequestInit) => Promise<Response>;
 
 interface CentralAuthManagerOptions {
+  /** False for a host whose identity and directory are local. No account operation can run. */
+  enabled?: boolean;
   apiUrl: string;
   mobileConnectApiUrl?: string;
   storagePath: string;
@@ -184,6 +186,7 @@ export class CentralAuthManager extends EventEmitter<CentralAuthEvents> {
     this.#transport = CentralAuthTransport.layer(fetcher);
     this.#options = {
       ...options,
+      enabled: options.enabled ?? true,
       mobileConnectApiUrl: options.mobileConnectApiUrl ?? options.apiUrl,
       canPersist: options.canPersist ?? (() => true),
       fetch: fetcher,
@@ -192,6 +195,7 @@ export class CentralAuthManager extends EventEmitter<CentralAuthEvents> {
       startupRetryDelaysMs: options.startupRetryDelaysMs ?? STARTUP_RETRY_DELAYS_MS,
       emailCodeRequestTimeoutMs: options.emailCodeRequestTimeoutMs ?? EMAIL_CODE_REQUEST_TIMEOUT_MS,
     };
+    if (!this.#options.enabled) this.#state = { status: "signed_out" };
   }
 
   readonly #pending = new Set<Deferred.Deferred<void>>();
@@ -204,6 +208,16 @@ export class CentralAuthManager extends EventEmitter<CentralAuthEvents> {
     operation: Effect.Effect<A, CentralAuthOperationError, CentralAuthTransport>,
   ): Effect.Effect<A, CentralAuthOperationError> {
     return Effect.suspend(() => {
+      if (!this.#options.enabled)
+        return Effect.fail(
+          new CentralAuthOperationError({
+            cause: new AuthApiError(
+              403,
+              "private_account_unavailable",
+              sourceText("error.privateAccess.accountUnavailable"),
+            ),
+          }),
+        );
       const done = Deferred.makeUnsafe<void>();
       this.#pending.add(done);
       return operation.pipe(

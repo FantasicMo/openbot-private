@@ -9,6 +9,7 @@ import { createEffect, createMemo, createSignal, flush, onSettled, untrack } fro
 import { actionToast } from "../../action-toast";
 import { FALLBACK_HOST_STATUS } from "../../app-defaults";
 import { createSimpleContext } from "../../simple-context";
+import { PRIVATE_BUILD } from "../private-access/private-build";
 import {
   olderAppSide,
   remoteUpdateServer,
@@ -307,18 +308,20 @@ const Servers = createSimpleContext({
       void refreshHostedServersAvailable();
       // Another account can sign in after the start, so the plus button reads its access again.
       let signedInUserId: string | null = null;
-      const unsubscribeAuth = serversPort().auth.onEvent((state) => {
-        if (state.status !== "signed_in" && state.status !== "signed_out") return;
-        const userId = state.status === "signed_in" ? state.user.id : null;
-        if (userId === signedInUserId) return;
-        signedInUserId = userId;
-        if (userId) void refreshHostedServersAvailable();
-        else {
-          setHostedServersAvailable(false);
-          setHostedServerIds(new Set<string>());
-          setHostedServersLoaded(false);
-        }
-      });
+      const unsubscribeAuth = PRIVATE_BUILD
+        ? () => undefined
+        : serversPort().auth.onEvent((state) => {
+            if (state.status !== "signed_in" && state.status !== "signed_out") return;
+            const userId = state.status === "signed_in" ? state.user.id : null;
+            if (userId === signedInUserId) return;
+            signedInUserId = userId;
+            if (userId) void refreshHostedServersAvailable();
+            else {
+              setHostedServersAvailable(false);
+              setHostedServerIds(new Set<string>());
+              setHostedServersLoaded(false);
+            }
+          });
       return () => {
         unsubscribeServers();
         unsubscribeHost();
@@ -331,6 +334,11 @@ const Servers = createSimpleContext({
      * account can change after the start.
      */
     async function refreshHostedServersAvailable(): Promise<boolean> {
+      if (PRIVATE_BUILD) {
+        setHostedServersAvailable(false);
+        setHostedServersLoaded(true);
+        return false;
+      }
       // A failed read keeps the last answer: a network error does not turn the plans off.
       const list = await serversPort()
         .hostedServers.list()
