@@ -2,12 +2,12 @@
 // HTTP/WS routing and resource cleanup are a fixture, not the real HostService/TeamApiServer.
 // Run: bun scripts/private-access-host-e2e.ts
 import assert from "node:assert/strict";
-import { createCipheriv, createDecipheriv, randomBytes, randomUUID } from "node:crypto";
+import { createCipheriv, createDecipheriv, createHash, randomBytes, randomUUID } from "node:crypto";
 import { once } from "node:events";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { createServer, type Server } from "node:http";
 import { join, resolve } from "node:path";
-import type { HostStatus, PrivateAccessPairing } from "@openbot/contracts/ipc";
+import type { HostStatus, PrivateAccessPairing, PrivateAccessStatus } from "@openbot/contracts/ipc";
 import { createOpenBotLogger } from "@openbot/logging";
 import { PrivateHostPairingOfferSchema } from "@openbot/private-access/contracts";
 import { Effect, Result, Schema } from "effect";
@@ -21,10 +21,17 @@ const logger = createOpenBotLogger("private-access-host-e2e");
 const outputDirectory = resolve(import.meta.dirname, "../.openbot-build/private-access-host-e2e");
 const profile = join(outputDirectory, `profile-${randomUUID()}`);
 const secrets: string[] = [];
-const report: { passed: boolean; scope: string; steps: { name: string; passed: boolean }[]; unverified: string[] } = {
+const report: {
+  passed: boolean;
+  scope: string;
+  steps: { name: string; passed: boolean }[];
+  settingsPreservation: { case: string; beforeSha256: string; afterSha256: string; revocationPersisted: boolean }[];
+  unverified: string[];
+} = {
   passed: false,
   scope: "real_TeamStore_owner_and_private_host_service_with_HTTP_WS_fixture",
   steps: [],
+  settingsPreservation: [],
   unverified: [
     "OS-backed Electron safeStorage: this fixture uses an ephemeral AES-GCM cipher.",
     "Real HostService, TeamApiServer routes, browser and remote-screen cleanup.",
@@ -313,6 +320,59 @@ async function main(): Promise<void> {
         "A cipher error must not replace the host identity.",
       );
     });
+    await Effect.runPromise(service.shutdown());
+    for (const fixture of [
+      {
+        name: "unknown_version",
+        bytes: Buffer.from('{\n  "version": 2, "labels": {}, "futureSetting": "preserve exactly"\n}\n', "utf8"),
+      },
+      { name: "corrupt_bytes", bytes: Buffer.from([0xff, 0xfe, 0x7b, 0x00, 0x0a]) },
+    ]) {
+      await step(`revoke_device_preserves_${fixture.name}_settings_bytes`, async () => {
+        const invite = await Effect.runPromise(store.createInvite("admin"));
+        const password = randomBytes(32).toString("base64url");
+        secrets.push(invite.token, password);
+        const accepted = await Effect.runPromise(
+          store.acceptInvite(invite.token, `readonly-${fixture.name}`, password),
+        );
+        secrets.push(accepted.sessionToken);
+        assert.ok(
+          store.authenticateSession(accepted.sessionToken),
+          "The real device session must exist before revocation.",
+        );
+        const settingsPath = join(profile, "openbot-private-access-v1.json");
+        await writeFile(settingsPath, fixture.bytes);
+        service = new PrivateAccessHostService({ directory: profile, store, host });
+        const initial = await Effect.runPromise(service.initialize());
+        assert.equal(initial.phase, "error");
+        assert.equal(initial.errorCode, "invalid_configuration");
+        assert.ok(initial.devices.some((device) => device.memberId === accepted.member.id));
+        let notified: PrivateAccessStatus | undefined;
+        service.once("changed", (status) => {
+          notified = status;
+        });
+        const revoked = await Effect.runPromise(service.revokeDevice(accepted.member.id));
+        assert.equal(revoked.phase, "error");
+        assert.equal(revoked.errorCode, "invalid_configuration");
+        assert.ok(!revoked.devices.some((device) => device.memberId === accepted.member.id));
+        assert.ok(notified && !notified.devices.some((device) => device.memberId === accepted.member.id));
+        assert.equal(store.authenticateSession(accepted.sessionToken), null);
+        const after = await readFile(settingsPath);
+        assert.deepEqual(after, fixture.bytes, "Revocation must preserve every unreadable settings byte.");
+        const reloaded = new TeamStore(storePath);
+        await Effect.runPromise(reloaded.initialize());
+        assert.equal(reloaded.authenticateSession(accepted.sessionToken), null);
+        assert.ok(!reloaded.listMembers().some((member) => member.id === accepted.member.id));
+        assert.equal(reloaded.getIdentity()?.fingerprint, firstIdentity.fingerprint);
+        report.settingsPreservation.push({
+          case: fixture.name,
+          beforeSha256: createHash("sha256").update(fixture.bytes).digest("hex"),
+          afterSha256: createHash("sha256").update(after).digest("hex"),
+          revocationPersisted: true,
+        });
+        await Effect.runPromise(service.shutdown());
+      });
+    }
     report.passed = true;
   } finally {
     for (const socket of clients) socket.terminate();

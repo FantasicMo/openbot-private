@@ -12,3 +12,8 @@ or rewrite stored agent paths.
 - Add trusted private pairing/configuration/revocation IPC, independent preload decoding, safe device
 status and a shared Android pairing-offer schema. Added a focused real-TeamStore persistence and
 revocation E2E; packaged desktop, Serve and Android acceptance remain separate checks.
+
+### Fixed
+
+- Preserve unreadable private connection settings when revoking devices. The device and its
+sessions are still revoked, while unknown-version or damaged settings keep their original bytes.

@@ -188,7 +188,7 @@ export class PrivateAccessHostService extends EventEmitter<{ changed: [status: P
         .removeMember(memberId)
         .pipe(Effect.mapError(() => privateHostFailure("operation_failed")));
       delete this.#settings.labels[memberId];
-      yield* this.#save();
+      if (!this.#readOnly) yield* this.#save();
       this.#changed();
       return this.getStatus();
     },
@@ -284,9 +284,12 @@ export class PrivateAccessHostService extends EventEmitter<{ changed: [status: P
 
   #save() {
     return this.#writes.withPermit(
-      Effect.suspend(() => writePreferenceFile(this.#path, { version: 1, ...this.#settings })).pipe(
-        Effect.mapError(() => privateHostFailure("operation_failed")),
-      ),
+      Effect.suspend(() => {
+        if (this.#readOnly) return Effect.fail(privateHostFailure("invalid_configuration"));
+        return writePreferenceFile(this.#path, { version: 1, ...this.#settings }).pipe(
+          Effect.mapError(() => privateHostFailure("operation_failed")),
+        );
+      }),
     );
   }
 
