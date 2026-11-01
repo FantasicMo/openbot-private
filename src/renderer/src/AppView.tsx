@@ -12,6 +12,7 @@ import { useServerSelection } from "./features/servers/server-selection";
 import { useSettings } from "./features/settings/settings-context";
 import { StartupSplash } from "./features/startup/StartupSplash";
 import { WhatsNewOverlay } from "./features/updates/WhatsNewOverlay";
+import { useI18n } from "./i18n-context";
 import { AccountLogin, FirstRunFlow, InitialSetup, LanguageStep } from "./lazy-views";
 import { usePlatform } from "./platform";
 import { WorkspaceShell } from "./WorkspaceShell";
@@ -34,13 +35,12 @@ function LoadingScreen() {
  * placeholders with a blank window and serialize the bootstrap loads that
  * currently run in parallel. See `app-providers.tsx`.
  *
- * `account` is threaded down as an accessor because the innermost `<Show>` is
- * what proves it non-null; the workspace and its overlays need the account, and
- * re-reading `signedInAccount()` below would hand them a nullable value the
- * gate has already ruled out.
+ * `account` is threaded down as a nullable accessor. Private hosts have a local
+ * owner and reach the workspace without an official account.
  */
 export function AppAccessGate() {
   const platform = usePlatform();
+  const i18n = useI18n();
   const auth = useAuth();
   const setup = useSetup();
   const scope = useServerScope();
@@ -53,7 +53,9 @@ export function AppAccessGate() {
   const [splashShown, setSplashShown] = createSignal(true);
   const languageStep = createLanguageStep();
   // Only a settled sign-out: a code in flight or a retry keeps the sign-in screen it belongs to.
-  const languageStepShown = () => auth.centralAuth().status === "signed_out" && !languageStep.done();
+  // The language button reopens the wheel from an error too, so that state does not hide it.
+  const languageStepShown = () =>
+    !languageStep.done() && (languageStep.reopened() || auth.centralAuth().status === "signed_out");
   // A computer signed in before the wheel existed has its language already, so a later sign-out skips the wheel.
   createEffect(
     () => auth.centralAuth().status === "signed_in",
@@ -83,10 +85,16 @@ export function AppAccessGate() {
                     onRequestEmailCode={auth.requestEmailCode}
                     onVerifyEmailCode={auth.verifyEmailCode}
                     onReset={auth.logoutCentralAccount}
+                    language={i18n.locale()}
+                    onChangeLanguage={languageStep.reopen}
                   />
                 }
               >
-                <LanguageStep variant={platform.appInfo()?.variant ?? "production"} onDone={languageStep.complete} />
+                <LanguageStep
+                  variant={platform.appInfo()?.variant ?? "production"}
+                  reopened={languageStep.reopened()}
+                  onDone={languageStep.complete}
+                />
               </Show>
             </Loading>
           }
@@ -94,7 +102,11 @@ export function AppAccessGate() {
           <Show
             when={!PRIVATE_BUILD || languageStep.done()}
             fallback={
-              <LanguageStep variant={platform.appInfo()?.variant ?? "production"} onDone={languageStep.complete} />
+              <LanguageStep
+                variant={platform.appInfo()?.variant ?? "production"}
+                reopened={languageStep.reopened()}
+                onDone={languageStep.complete}
+              />
             }
           >
             <Show

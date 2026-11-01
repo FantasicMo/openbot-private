@@ -7,9 +7,15 @@ on:
         description: Positive Android versionCode. Use a larger value for an installed app upgrade.
         required: true
         type: string
+      verify_upgrade:
+        description: Also pair the accepted versionCode 1003 APK and check an in-place update.
+        required: false
+        default: true
+        type: boolean
 
 permissions:
   contents: read
+  actions: read
 
 concurrency:
   group: private-android-candidate-${{ github.ref }}
@@ -30,6 +36,7 @@ jobs:
       CI: "1"
       OPENBOT_PRIVATE_BUILD: "1"
       OPENBOT_ANDROID_VERSION_CODE: ${{ inputs.version_code }}
+      VERIFY_UPGRADE: ${{ inputs.verify_upgrade && '1' || '0' }}
       EXPO_PUBLIC_APP_ENV: preview
       EXPO_NO_TELEMETRY: "1"
       ELECTRON_SKIP_BINARY_DOWNLOAD: "1"
@@ -54,6 +61,10 @@ jobs:
           fi
           if [[ ! "$OPENBOT_ANDROID_VERSION_CODE" =~ ^[1-9][0-9]{0,9}$ ]] || (( OPENBOT_ANDROID_VERSION_CODE > 2100000000 )); then
             echo 'version_code must be an integer from 1 to 2100000000.' >&2
+            exit 1
+          fi
+          if [[ "$VERIFY_UPGRADE" == '1' ]] && (( OPENBOT_ANDROID_VERSION_CODE <= 1003 )); then
+            echo 'The selected upgrade baseline is versionCode 1003. Use a larger candidate version_code.' >&2
             exit 1
           fi
           if [[ ! "${CERT_SHA256//:/}" =~ ^[[:xdigit:]]{64}$ ]]; then
@@ -330,12 +341,21 @@ jobs:
             sdkmanager --list_installed
           } > "$CANDIDATE_DIR/emulator/tools.txt"
 
+      - name: Fetch the pinned accepted Android upgrade baseline
+        if: inputs.verify_upgrade
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python3 scripts/private-upgrade-baseline.py --platform android --output-dir "$RUNNER_TEMP/private-upgrade-baseline"
+          cp "$RUNNER_TEMP/private-upgrade-baseline/baseline-provenance.json" "$CANDIDATE_DIR/upgrade-baseline-provenance.json"
+
       - name: Start the release APK and check private first run
         id: startup
         shell: bash
         env:
           CERT_SHA256: ${{ vars.PRIVATE_ANDROID_CERT_SHA256 }}
-        run: python3 scripts/private-android-emulator-smoke.py --candidate-dir "$CANDIDATE_DIR"
+        run: python3 scripts/private-android-emulator-smoke.py --candidate-dir "$CANDIDATE_DIR" --pairing-fixture
 
       - name: Record the candidate acceptance state
         if: always()
@@ -367,9 +387,11 @@ jobs:
               'privateRuntimeSource': 'implemented',
               'emulatorStartup': 'passed' if passed else os.environ.get('STARTUP_OUTCOME', 'not_run'),
               'networkEvidence': report.get('network', {'instrumented': False}),
+              'nativePairingFixture': report.get('nativePairing', {'passed': False, 'status': 'not_run'}),
+              'upgradeVerification': report.get('upgrade', {'performed': False, 'status': 'not_run'}),
               'realHostPairing': 'not_run',
               'phoneAndClashMi': 'not_run',
-              'scope': 'Startup and local invalid-offer interaction only; no Metro, host, provider, tailnet or account credentials.',
+              'scope': 'Clean startup, native HTTPS pairing fixture and selected old-to-new update. No real host, provider, tailnet or account credentials.',
           }
           (candidate / 'ACCEPTANCE.json').write_text(json.dumps(state, indent=2) + '\n')
           (candidate / 'ACCEPTANCE.txt').write_text(

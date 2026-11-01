@@ -65,6 +65,7 @@ export const messages = {
   "error.backend.channelReferenceUnavailable": "Сообщение канала, на которое сделана ссылка, недоступно.",
   "error.backend.channelTaskNotFound": "Задача канала не найдена.",
   "error.backend.channelTaskComplete": "Эта задача уже выполнена.",
+  "error.backend.channelTaskNotStopped": "Отменить можно только остановленную или неудавшуюся задачу.",
   "error.backend.channelSelectAgent": "Выберите агента.",
   "error.backend.channelLeadRequired": "Выберите доступного ведущего канала или назначьте эту задачу участнику.",
   "error.backend.channelRoutingTooLong":
@@ -334,6 +335,9 @@ export const messages = {
   "error.backend.threadOpenLimitReached":
     "У этого агента открыто веток: {count}. Архивируйте ветку, затем начните или восстановите другую.",
   "error.backend.threadRemoteUnsupported": "Ветки доступны только для агентов на этом компьютере.",
+  "error.backend.branchSourceBusy": "Остановите текущий ход, прежде чем создать ответвление этого чата.",
+  "error.backend.branchMessageNotFound": "Ответвление можно создать только от завершённого ответа агента.",
+  "error.backend.branchRemoteUnsupported": "Ответвления доступны только для агентов на этом компьютере.",
   "error.backend.threadMoveRefused":
     "В новой ветке можно запустить только сообщение, которое вы отправили одному этому агенту.",
   "error.backend.taskTitleRequired": "Дайте задаче короткое название.",

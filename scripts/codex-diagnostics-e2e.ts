@@ -1,5 +1,6 @@
 // Replays Codex stderr through the real stream reader and ProviderRuntime service. The injected
 // client answers local protocol reads only; no provider account, model request or app is used.
+// v0.58 keeps Codex stderr in the log. Sign-in replies and process exits report actual failures.
 // Run: bun scripts/codex-diagnostics-e2e.ts
 // Report: .openbot-build/codex-diagnostics-e2e/report.json
 import assert from "node:assert/strict";
@@ -8,10 +9,10 @@ import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { AGENT_PROVIDERS } from "@openbot/contracts/ipc";
 import { redactText, teeLogLines } from "@openbot/logging";
-import { Effect } from "effect";
+import { Effect, Result } from "effect";
 import { ConversationRuntime } from "../src/backend/agent/conversation-runtime";
 import { ProviderRuntime } from "../src/backend/agent/provider-runtime";
-import type { AgentClient, DiagnosticOrigin } from "../src/backend/agent-client";
+import { type AgentClient, AgentProcessExitError, type DiagnosticOrigin } from "../src/backend/agent-client";
 import { AgentStore } from "../src/backend/agent-store";
 import type {
   AppServerNotification,
@@ -64,6 +65,8 @@ class DiagnosticClient extends EventEmitter<ClientEvents> implements AgentClient
           });
         case "model/list":
           return decoder({ data: [{ model: "fixture-model", displayName: "Fixture model" }], nextCursor: null });
+        case "account/login/start":
+          throw new Error(LOGIN_FAILURE);
         default:
           throw new Error(`Unexpected fixture request: ${method}`);
       }
@@ -102,6 +105,7 @@ const logs: string[] = [];
 const stopLog = teeLogLines(["provider-runtime", "provider-stderr"], (line) => logs.push(line));
 const store = new AgentStore(join(root, "user-data"), join(root, "home"));
 const client = new DiagnosticClient();
+let mainClientCreated = false;
 const runtime = new ProviderRuntime({
   conversation: new ConversationRuntime(
     store,
@@ -128,7 +132,11 @@ const runtime = new ProviderRuntime({
   requestTimeoutMs: 5_000,
   preferredProvider: "codex",
   offProviders: AGENT_PROVIDERS.filter((provider) => provider !== "codex"),
-  clientFactory: () => client,
+  clientFactory: () => {
+    if (mainClientCreated) return new DiagnosticClient();
+    mainClientCreated = true;
+    return client;
+  },
   bundledExecutables: { codex: executable },
   credentials: NO_PROVIDER_CREDENTIALS,
   redactMcp: redactText,
@@ -137,6 +145,7 @@ const runtime = new ProviderRuntime({
 const SNAPSHOT = "Failed to create shell snapshot for powershell: Shell snapshot not supported yet for PowerShell";
 const CANCELLED = "dynamic tool call was cancelled before receiving a response";
 const SYNTHETIC_SECRET = "codex-diagnostic-fixture-credential";
+const LOGIN_FAILURE = "ChatGPT connection was refused by the fixture.";
 function record(
   level: string,
   target: string,
@@ -146,53 +155,44 @@ function record(
 }
 
 const cases = [
-  { name: "snapshot-json", text: record("WARN", "codex_core::shell_snapshot", { message: SNAPSHOT }), visible: false },
-  { name: "snapshot-text", text: `2026-10-31T07:50:27Z  WARN codex_core::shell_snapshot: ${SNAPSHOT}`, visible: false },
-  { name: "cancel-json", text: record("ERROR", "codex_core::tools::router", { error: CANCELLED }), visible: false },
+  { name: "snapshot-json", text: record("WARN", "codex_core::shell_snapshot", { message: SNAPSHOT }) },
+  { name: "snapshot-text", text: `2026-10-31T07:50:27Z  WARN codex_core::shell_snapshot: ${SNAPSHOT}` },
+  { name: "cancel-json", text: record("ERROR", "codex_core::tools::router", { error: CANCELLED }) },
   {
     name: "cancel-text",
     text: `2026-10-31T07:51:40Z ERROR codex_core::tools::router: error=${CANCELLED}`,
-    visible: false,
+  },
+  {
+    // Representative records for the harmless startup case named by upstream issue #4265.
+    // These are fixture text, not a captured CLI transcript.
+    name: "untrusted-folder-json",
+    text: record("ERROR", "codex_core::config", {
+      message: "Project folder is not trusted; its config.toml settings are ignored.",
+    }),
+  },
+  {
+    name: "untrusted-folder-text",
+    text: "ERROR codex_core::config: Project folder is not trusted; its config.toml settings are ignored.",
   },
   {
     name: "tool-error-json",
     text: record("ERROR", "codex_core::tools::router", { error: "image generation failed" }),
-    visible: false,
   },
   {
     name: "long-tool-json",
     text: record("ERROR", "codex_core::tools::router", { error: CANCELLED, detail: "x".repeat(3_000) }),
-    visible: false,
   },
   {
     name: "snapshot-redaction",
     text: record("WARN", "codex_core::shell_snapshot", { message: SNAPSHOT, api_key: SYNTHETIC_SECRET }),
-    visible: false,
   },
   {
     name: "cancel-redaction",
     text: record("ERROR", "codex_core::tools::router", { error: CANCELLED, api_key: SYNTHETIC_SECRET }),
-    visible: false,
   },
   {
     name: "fatal-tool-json",
     text: record("ERROR", "codex_core::tools::router", { error: "Fatal error: execution stopped" }),
-    visible: true,
-  },
-  {
-    name: "fatal-tool-whitespace",
-    text: record("ERROR", "codex_core::tools::router", { error: "  Fatal error: execution stopped" }),
-    visible: true,
-  },
-  {
-    name: "fatal-tool-json-with-tool-marker",
-    text: record("ERROR", "codex_core::tools::router", { error: "Fatal error: tool_error: execution_failure" }),
-    visible: true,
-  },
-  {
-    name: "authentication-json-with-tool-marker",
-    text: record("ERROR", "codex_core::auth", { message: "Authentication failed after tool_error: parse_failure" }),
-    visible: true,
   },
   {
     name: "unexpected-fields-with-tool-marker",
@@ -201,70 +201,31 @@ const cases = [
       target: "codex_core::tools::router",
       fields: ["Fatal error: tool_error: execution_failure"],
     }),
-    visible: true,
-  },
-  {
-    name: "fatal-tool-text",
-    text: "ERROR codex_core::tools::router: error=Fatal error: execution stopped",
-    visible: true,
   },
   {
     name: "fatal-tool-text-with-tool-marker",
     text: "ERROR codex_core::tools::router: error=Fatal error: tool_error: execution_failure",
-    visible: true,
   },
   {
-    name: "fatal-tool-text-leading-whitespace",
-    text: "ERROR codex_core::tools::router: error=  Fatal error: execution stopped",
-    visible: true,
-  },
-  { name: "legacy-tool-error-text", text: "tool_error: execution_failure", visible: false },
-  {
-    name: "legacy-mcp-tool-error-text",
-    text: "error executing cascade step: CORTEX_STEP_TYPE_MCP_TOOL: Error: fixture tool failed",
-    visible: false,
+    name: "credential-fallback-text",
+    text: 'WARN codex_otel::auth_storage: credential storage file fallback completed secure_error="none" outcome="not_found"',
   },
   {
-    name: "snapshot-error-level",
-    text: record("ERROR", "codex_core::shell_snapshot", { message: SNAPSHOT }),
-    visible: true,
-  },
-  {
-    name: "snapshot-other-failure",
-    text: record("WARN", "codex_core::shell_snapshot", {
-      message: "Failed to create shell snapshot: permission denied",
-    }),
-    visible: true,
-  },
-  { name: "different-subsystem", text: record("WARN", "codex_core::transport", { message: SNAPSHOT }), visible: true },
-  {
-    name: "authentication-error",
-    text: record("ERROR", "codex_core::auth", { message: "Authentication failed: unauthorized" }),
-    visible: true,
-  },
-  {
-    name: "unexpected-fields-shape",
-    text: JSON.stringify({ level: "ERROR", target: "codex_core::tools::router", fields: [] }),
-    visible: true,
-  },
-  {
-    name: "missing-tool-error",
-    text: record("ERROR", "codex_core::tools::router", { message: "router failed" }),
-    visible: true,
-  },
-  {
-    name: "visible-error-redaction",
+    name: "authentication-stderr-redaction",
     text: record("ERROR", "codex_core::auth", { message: "Authentication failed", api_key: SYNTHETIC_SECRET }),
-    visible: true,
   },
 ];
 const report: {
+  contract: string;
   passed: boolean;
   cases: { name: string; passed: boolean; visible: boolean; logged: boolean }[];
+  failures: { name: string; passed: boolean; surface: "provider-status" | "process-exit" }[];
   error?: string;
 } = {
+  contract: "upstream-v0.58.0-codex-stderr-log-only",
   passed: false,
   cases: [],
+  failures: [],
 };
 
 try {
@@ -281,20 +242,51 @@ try {
     const visible = newErrors.some((error) => error.code === "codex_diagnostic");
     const result = { name: check.name, passed: false, visible, logged: newLogs.length > 0 };
     report.cases.push(result);
-    assert.equal(visible, check.visible, check.name);
+    assert.equal(newErrors.length, 0, `${check.name}: stderr must not invent a provider failure`);
     assert.equal(result.logged, true, `${check.name}: the diagnostic must remain in the log`);
     assert.equal(
       JSON.stringify([newErrors, newLogs]).includes(SYNTHETIC_SECRET),
       false,
       `${check.name}: no credential may escape`,
     );
-    if (!check.visible) {
-      assert.equal(runtime.lastError("codex"), lastError, `${check.name}: the provider error must stay unchanged`);
-      assert.equal(runtime.isReady(), true, `${check.name}: the provider must remain ready`);
-      assert.equal(client.running, true, `${check.name}: the provider must keep running`);
-    }
+    assert.equal(runtime.lastError("codex"), lastError, `${check.name}: the provider error must stay unchanged`);
+    assert.equal(runtime.isReady(), true, `${check.name}: the provider must remain ready`);
+    assert.equal(client.running, true, `${check.name}: the provider must keep running`);
     result.passed = true;
   }
+  const signIn = { name: "protocol-sign-in-failure", passed: false, surface: "provider-status" as const };
+  report.failures.push(signIn);
+  const login = await Effect.runPromise(runtime.startProviderCodeLogin("codex").pipe(Effect.result));
+  assert.equal(Result.isFailure(login), true, "A refused protocol sign-in must fail its caller.");
+  assert.equal(
+    runtime.status().providers?.find((provider) => provider.id === "codex")?.message,
+    LOGIN_FAILURE,
+    "The provider status must show the protocol sign-in failure.",
+  );
+  assert.equal(runtime.isReady(), true, "A failed new sign-in must keep the existing connection.");
+  signIn.passed = true;
+
+  const exit = { name: "process-exit-with-redacted-detail", passed: false, surface: "process-exit" as const };
+  report.failures.push(exit);
+  const beforeExit = errors.length;
+  const logsBeforeExit = logs.length;
+  client.emit(
+    "exit",
+    new AgentProcessExitError(
+      "Fixture Codex process exited.",
+      `ERROR codex_core::fixture: stopped api_key="${SYNTHETIC_SECRET}"`,
+    ),
+  );
+  const exitError = errors.slice(beforeExit).find((error) => error.code === "codex_exited");
+  assert.ok(exitError, "A process exit must remain a provider failure.");
+  assert.match(exitError.message, /Fixture Codex process exited/);
+  assert.match(exitError.message, /codex_core::fixture/);
+  assert.equal(
+    JSON.stringify([exitError, logs.slice(logsBeforeExit), runtime.status()]).includes(SYNTHETIC_SECRET),
+    false,
+  );
+  assert.equal(runtime.isReady(), false, "An exited provider must not remain ready.");
+  exit.passed = true;
   report.passed = true;
 } catch (error) {
   report.error = error instanceof Error ? redactText(error.message) : "The diagnostic service check failed.";
@@ -309,5 +301,5 @@ try {
   await writeFile(join(OUT, "report.json"), `${JSON.stringify(report, null, 2)}\n`);
 }
 process.stdout.write(
-  `${JSON.stringify({ passed: report.passed, cases: report.cases.length, report: join(OUT, "report.json") })}\n`,
+  `${JSON.stringify({ passed: report.passed, stderrCases: report.cases.length, failureCases: report.failures.length, report: join(OUT, "report.json") })}\n`,
 );

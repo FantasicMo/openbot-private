@@ -97,10 +97,16 @@ export const messages = {
   "agentSettings.agentTitle": "Titre",
   "agentSettings.agentTitleLabel": "Titre de l’agent",
   "agentSettings.agentTitlePlaceholder": "Décrivez ce que fait votre agent",
+  "agentSettings.description": "Description",
+  "agentSettings.descriptionLabel": "Description de l’agent",
+  "agentSettings.descriptionResize": "Redimensionner la description",
+  "agentSettings.descriptionPlaceholder": "À quoi sert cet agent",
   "agentSettings.instructions": "Instructions",
   "agentSettings.instructionsLabel": "Instructions de l’agent",
-  "agentSettings.instructionsResize": "Redimensionner les instructions",
-  "agentSettings.instructionsPlaceholder": "À quoi sert cet agent",
+  "agentSettings.instructionsEdit": "Modifier les instructions",
+  "agentSettings.instructionsChangedWhileEditing":
+    "L'agent a modifié ses instructions pendant que tu les modifiais. Enregistre à nouveau pour remplacer sa version.",
+  "agentSettings.instructionsPlaceholder": "Règles que cet agent suit toujours",
 
   "agentSettings.avatar.edit": "Modifier l’avatar de l’agent",
   "agentSettings.avatar.editor": "Éditeur d’avatar",
@@ -162,7 +168,6 @@ export const messages = {
   "agentSettings.notificationLevel.server": "Par défaut du serveur ({level})",
   "agentSettings.notificationLevel.note":
     "Ce choix ne concerne que vous, sur tous vos appareils. Si le serveur est en sourdine ou réglé sur « Rien », cet agent reste aussi silencieux.",
-  "agentSettings.notificationLevel.sharedOff": "Les notifications de cet agent sont désactivées pour tous les membres.",
 
   "agentSettings.newChat.title": "Nouvelle discussion",
   "agentSettings.newChat.description": "L’agent oublie cette discussion. Sa configuration reste.",

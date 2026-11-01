@@ -63,6 +63,10 @@ def main():
     parser.add_argument("--expected-version-code", type=int)
     parser.add_argument("--pairing-fixture", action="store_true", help="Also test native pairing against an isolated HTTPS fixture with an emulator-only system test CA.")
     args = parser.parse_args()
+    baseline_argument = os.environ.get("PRIVATE_UPGRADE_BASELINE")
+    baseline = Path(baseline_argument).resolve() if baseline_argument else None
+    if baseline is not None:
+        args.pairing_fixture = True
     if os.environ.get("GITHUB_ACTIONS") != "true" or os.environ.get("RUNNER_ENVIRONMENT") != "github-hosted" or sys.platform != "linux":
         parser.error("This command requires a disposable GitHub-hosted Linux runner.")
     if args.observe_seconds < 30 or args.observe_seconds > 120:
@@ -71,6 +75,8 @@ def main():
         parser.error("The expected APK hash must be a SHA-256 hex digest.")
     if args.expected_version_code is not None and not 1 <= args.expected_version_code <= 2_100_000_000:
         parser.error("The expected versionCode must be from 1 to 2100000000.")
+    if baseline is not None and Path(os.environ["RUNNER_TEMP"]).resolve() not in baseline.parents:
+        parser.error("The baseline APK must be in the disposable runner temporary directory.")
 
     candidate = args.candidate_dir.resolve()
     output = candidate / "emulator"
@@ -186,6 +192,23 @@ def main():
             report["versionCode"] = version_code
 
         record("same_signed_release_apk_hash_and_embedded_bundle", verify_apk)
+        if baseline is not None:
+            def verify_baseline():
+                digest = hashlib.sha256(baseline.read_bytes()).hexdigest()
+                expected = "ba6a54d92cfbf75c1a4c91aa54ef32c981ebd97605c23781ca0ce83cb5fbbc87"
+                if digest != expected or os.environ.get("PRIVATE_UPGRADE_BASELINE_SHA256") != expected:
+                    raise RuntimeError("The upgrade baseline differs from the accepted versionCode 1003 APK.")
+                tools = sorted((sdk / "build-tools").iterdir(), key=lambda path: tuple(map(int, re.findall(r"\d+", path.name))))[-1]
+                signature = run([tools / "apksigner", "verify", "--verbose", "--print-certs", baseline]).stdout.decode()
+                certificate = apk_signer_certificate_fingerprint(signature, os.environ.get("CERT_SHA256", ""))
+                badging = run([tools / "aapt", "dump", "badging", baseline]).stdout.decode()
+                identity = re.search(r"^package: name='([^']+)' versionCode='([0-9]+)'", badging, re.MULTILINE)
+                if identity is None or identity.group(1) != PACKAGE or int(identity.group(2)) != 1003 or report["versionCode"] <= 1003:
+                    raise RuntimeError("The upgrade must retain the package and raise versionCode above 1003.")
+                if re.search(r"^application-debuggable(?:\s|$)", badging, re.MULTILINE):
+                    raise RuntimeError("The baseline must be a non-debuggable release APK.")
+                report["upgrade"] = {"performed": False, "fromVersionCode": 1003, "toVersionCode": report["versionCode"], "baselineApkSha256": digest, "candidateApkSha256": report["apkSha256"], "certificateSha256": certificate}
+            record("pinned_1003_baseline_has_the_same_private_release_signer", verify_baseline)
         with socket.socket() as probe:
             probe.settimeout(1)
             if probe.connect_ex(("127.0.0.1", 8081)) == 0:
@@ -275,10 +298,43 @@ def main():
         screen("startup-complete")
         if args.pairing_fixture:
             pairing_started = True
+            if baseline is not None:
+                # The candidate clean-start check above keeps its original scope. Replace only
+                # that CI-created app data before preparing old-release upgrade state.
+                shell("am", "force-stop", PACKAGE)
+                device("uninstall", PACKAGE, timeout=60)
+                device("install", "--no-streaming", str(baseline), timeout=180)
+                baseline_uid = re.search(r"\buid:(\d+)\b", shell("cmd", "package", "list", "packages", "-U", PACKAGE))
+                if baseline_uid is None or int(baseline_uid.group(1)) < 10000:
+                    raise RuntimeError("The baseline application UID is invalid.")
+                for table in configured_tables:
+                    shell(table, "-w", "5", "-D", "OUTPUT", "-m", "owner", "--uid-owner", app_uid, "-j", CHAIN)
+                    shell(table, "-w", "5", "-I", "OUTPUT", "1", "-m", "owner", "--uid-owner", baseline_uid.group(1), "-j", CHAIN)
+                app_uid = baseline_uid.group(1)
+                report["upgrade"]["baselineAppUid"] = int(app_uid)
+                record("install_old_release_with_new_isolated_test_data_before_pairing", lambda: None)
+            def upgrade_apk():
+                if baseline is None:
+                    raise RuntimeError("The pinned old APK is required for an upgrade.")
+                device("install", "--no-streaming", "-r", str(apk), timeout=180)
+                installed = shell("dumpsys", "package", PACKAGE)
+                versions = set(re.findall(r"\bversionCode=(\d+)\b", installed))
+                if versions != {str(report["versionCode"])} or "DEBUGGABLE" in installed:
+                    raise RuntimeError("The installed upgrade does not match the release candidate version.")
+                uid = re.search(r"\buid:(\d+)\b", shell("cmd", "package", "list", "packages", "-U", PACKAGE))
+                if uid is None or uid.group(1) != app_uid:
+                    raise RuntimeError("An in-place update must preserve the app UID and data.")
+                if hashlib.sha256(apk.read_bytes()).hexdigest() != report["apkSha256"] or hashlib.sha256(baseline.read_bytes()).hexdigest() != report["upgrade"]["baselineApkSha256"]:
+                    raise RuntimeError("An upgrade package changed during validation.")
+                report["upgrade"]["installedInPlace"] = True
             report["nativePairing"] = native_pairing_fixture(
                 device, shell, PACKAGE, activity, app_uid, CHAIN, configured_tables, output, sensitive_values,
+                upgrade_apk if baseline is not None else None,
             )
             record("isolated_HTTPS_native_identity_pairing_and_SecureStore_reopen", lambda: None)
+            if baseline is not None:
+                report["upgrade"]["performed"] = report["nativePairing"]["passed"]
+                record("signed_1003_to_candidate_update_preserves_native_host_and_session_without_repair", lambda: None)
         report["passed"] = True
     except Exception as error:
         report["error"] = f"{type(error).__name__}: {error}"

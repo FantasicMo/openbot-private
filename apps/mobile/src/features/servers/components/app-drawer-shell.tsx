@@ -314,6 +314,7 @@ export function AppDrawerShell({ children }: PropsWithChildren) {
                   open={drawerSettled}
                   servers={servers}
                   session={session}
+                  sideInset={drawerSideInset}
                   topInset={insets.top}
                   onNavigate={navigateAfterClosing}
                   onLeave={leaveServer}

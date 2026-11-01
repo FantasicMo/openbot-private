@@ -50,8 +50,10 @@ codecs. WSS uses `/v1/events`, the original auth subprotocol, capability scope a
 request. The transport does not retry mutations. Existing outbox receipts and `clientMessageId` stay
 in use. Upload progress reports start and confirmed completion; it does not claim byte progress.
 Ordinary attachment selection already uses the upstream mobile 10 MiB limit and its 10 MB error.
-Private uploads and downloads use that same limit; this does not provide the desktop's 100 MiB file
-range. Oversized uploads fail before network I/O and oversized download streams are cancelled.
+Private uploads and downloads use that same limit for chat attachments. The optional `agent-import-v1`
+stage and `instance-transfer-v1` stage/export routes use their released 100 MiB ZIP limits instead.
+The larger limit applies only to those POST routes, and uses the import/transfer error text.
+Oversized uploads fail before network I/O and oversized download streams are cancelled.
 Cancel selects the message's transfer ID, so it leaves another chat's upload to the same host running.
 Downloads preserve the released host's RFC 5987 UTF-8 filename, including Chinese text and extensions;
 malformed encoding uses a fallback name.

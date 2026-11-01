@@ -2,9 +2,21 @@
 
 This package is the first private transport slice for the Windows and Android fork. The main-process
 adapter now connects local identity, optional ingress and trusted IPC; packaged Electron and Android
-acceptance remain separate. It uses the source at upstream v0.56.0 as its
-integration baseline. No official Account, Signal, TURN, email or new user account is needed by the
+acceptance remain separate. The first delivered baseline was upstream v0.56.0; the current
+integration updates it to v0.58.0 while preserving the private contract and stored identities.
+No official Account, Signal, TURN, email or new user account is needed by the
 package itself.
+
+## Upstream integration policy
+
+Prefer the upstream implementation when changes conflict. Keep a different implementation only
+when it meets an explicit private-product requirement or has a concrete benefit supported by
+evidence and a focused check. Record that reason with the upgrade, and remove private patches
+that the upstream change makes redundant. File size limits and new feature behavior follow the
+released upstream contracts; do not impose a lower private limit by accident.
+
+The user's existing private account, telemetry, app identity, and LAN/Tailscale requirements
+remain part of the product. They are not removed by a routine upstream merge.
 
 ## Boundaries
 

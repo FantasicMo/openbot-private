@@ -91,6 +91,11 @@ Stripe reports, the place in the app where the plans were opened, the server siz
 and an error code. It has
 no email, name, Stripe ID or server ID. The desktop analytics setting does not stop these events,
 because the account service sends them and not your computer.
+When you pay for a plan or a license (it starts, each payment succeeds, it changes, or its renewal
+is cancelled or resumed), the account service also sets your normalized account email on the OpenPanel
+profile of your account ID, as the apps do at sign-in. It does this also when product analytics is
+off on your devices, so that the paid account is not anonymous in the sales data. The email is not
+copied into the events.
 
 For each email that the account service sends from its mailbox (a sign-in code, an invitation, a contact
 message or a welcome email), it sends OpenPanel one event with the kind of email and the result of the send. This
@@ -785,8 +790,9 @@ Agents, conversations, queues, direct messages, attachments, browser data, promp
 Remote Desktop data remain on the host. The central account service does not copy them into D1 or
 R2. The Signal service does not proxy them or write them to logs. The host does not need a public
 inbound port. The things Signal passes to a host are the Slack events of an agent's Slack app, the
-Discord mentions of the Discord app, the updates of the OpenBot Telegram bot, and the requests to
-webhook routines, in transit; see [Slack connections](#slack-connections),
+Discord mentions of the Discord app, the updates of the OpenBot Telegram bot, the GitHub events of
+the repositories that its GitHub triggers watch, and the requests to webhook routines, in transit;
+see [Workflows](#workflows), [Slack connections](#slack-connections),
 [Discord connections](#discord-connections), [Telegram connections](#telegram-connections), and
 [Webhook routines](#webhook-routines). For Discord and Telegram, Signal also carries the host's
 answers to the platform.
@@ -956,6 +962,16 @@ graph, or ID.
   signing secret, and 7-day receipts without the request body. The host refuses a body of more than
   64,000 characters. The body, marked as data, is the trigger's output and goes to the next steps.
   Remove the trigger, or delete the workflow, to stop its URL.
+- **GitHub triggers** receive the events of the OpenBot GitHub App: issues, comments, pull requests,
+  reviews and checks. GitHub sends each event to OpenBot's Signal service (`signal.openbot.run`).
+  Signal checks GitHub's signature, reads only the installation and repository IDs, and passes the
+  event to every computer that watches the repository, in transit only: it does not store or log it.
+  When the Signal connection opens, the computer sends the account service its GitHub sign-in and the
+  repositories that its GitHub triggers watch. The account service asks GitHub which of them that
+  sign-in can see, signs a 5-minute route for those repositories, and stores neither the sign-in nor
+  the list. The computer keeps the newest 50 deliveries of each trigger, without the event body: the
+  delivery ID, event name, item number, time, and whether it started a run. An event that arrives
+  while the computer is offline is lost; the history shows the gap.
 
 Members of a joined server can read, change, and run a workflow when they can see and use each
 agent in it (`workflows-v1`). The graph and the step text then go to their computer. Only owners

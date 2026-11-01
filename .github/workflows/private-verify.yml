@@ -65,6 +65,14 @@ jobs:
       - name: Check Codex diagnostic classification and redaction
         run: bun scripts/codex-diagnostics-e2e.ts
 
+      - name: Check released database schema migration and data preservation
+        shell: bash
+        run: |
+          set -euo pipefail
+          mapfile -t migration_tests < <(find src/backend -maxdepth 1 -type f -name '*migration.test.ts' | sort)
+          (( ${#migration_tests[@]} > 0 ))
+          bun run test:desktop -- src/backend/openbot-database.test.ts "${migration_tests[@]}" --maxWorkers=1
+
       - name: Check IPC, preload and renderer security boundaries
         run: >-
           bun run test:desktop --

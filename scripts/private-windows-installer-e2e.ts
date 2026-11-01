@@ -39,6 +39,22 @@ assert.ok(existsSync(installer), "The candidate installer must exist.");
 const installerSuffix = relative(resolve("dist-private"), installer);
 assert.ok(installerSuffix !== "" && !installerSuffix.startsWith("..") && !isAbsolute(installerSuffix));
 assert.match(basename(installer), /^OpenBot-Private-.+-x64\.exe$/u);
+const baselineArgument = process.env.PRIVATE_UPGRADE_BASELINE;
+const baselineInstaller = baselineArgument ? resolve(baselineArgument) : null;
+const baselineSha256 = process.env.PRIVATE_UPGRADE_BASELINE_SHA256;
+if (baselineInstaller) {
+  assert.ok(process.env.RUNNER_TEMP && baselineSha256);
+  const suffix = relative(resolve(process.env.RUNNER_TEMP), baselineInstaller);
+  assert.ok(suffix !== "" && !suffix.startsWith("..") && !isAbsolute(suffix));
+  assert.equal(basename(baselineInstaller), "OpenBot-Private-0.56.0-x64.exe");
+  assert.equal(baselineSha256, "51e55bb3182b2c43c954589983245813da2202b2680122cd1964c86972be1e4e");
+  assert.equal(
+    createHash("sha256")
+      .update(await readFile(baselineInstaller))
+      .digest("hex"),
+    baselineSha256,
+  );
+}
 const config = Schema.decodeUnknownSync(
   Schema.Struct({
     extends: Schema.String,
@@ -148,6 +164,7 @@ const report: {
   launches: LaunchEvidence[];
   stops: StopEvidence[];
   encryptionState?: { localStateSha256: string; ownerFileSha256: string; encryptedKeyPresent: boolean };
+  upgrade: { performed: boolean; baselineSha256: string | null; candidateSha256: string; historyMessages: number };
   officialDataChecks: {
     scope: "CI_sentinel_files_only";
     sentinels: { area: string; sha256: string; rootExistedBefore: boolean }[];
@@ -162,12 +179,21 @@ const report: {
   cleanupFailures: [],
   launches: [],
   stops: [],
+  upgrade: {
+    performed: false,
+    baselineSha256: baselineInstaller ? (baselineSha256 ?? null) : null,
+    candidateSha256: createHash("sha256")
+      .update(await readFile(installer))
+      .digest("hex"),
+    historyMessages: 0,
+  },
   officialDataChecks: { scope: "CI_sentinel_files_only", sentinels: [], verifiedAfter: [] },
   loginItemChecks: { scope: "CI_private_AUMID_only", preservedProfileWithSpaces: false, removed: false },
   unverified: [
+    ...(!baselineInstaller ? ["An older-release update was not selected."] : []),
     "Tailscale Serve HTTPS trust, ACLs, LAN routing, Clash coexistence and physical devices.",
     "Android native runtime, UI, file transfers and model-provider execution.",
-    "Remote desktop/browser streaming resources and migration from an older private release.",
+    "Remote desktop/browser streaming resources and user histories beyond the two CI-created direct messages.",
     "Lifecycle checks require verified CDP normal quit. Tray interaction, hard-crash and power-loss durability are separate checks.",
     "Unsigned internal candidate: no Authenticode publisher identity or SmartScreen acceptance is established.",
     "Official data preservation covers two CI-created sentinel files; other pre-existing official files are not inventoried.",
@@ -377,7 +403,11 @@ async function assertOfficialDataUnchanged(phase: "install" | "reinstall" | "uni
 }
 
 async function runInstaller(file: string, argumentsText: string): Promise<void> {
-  assert.ok(file === installer || (installedByThisRun && file === uninstaller && ownsInstalledPath(file)));
+  assert.ok(
+    file === installer ||
+      file === baselineInstaller ||
+      (installedByThisRun && file === uninstaller && ownsInstalledPath(file)),
+  );
   const installerProcess = spawn(file, [argumentsText], {
     windowsVerbatimArguments: true,
     windowsHide: true,
@@ -794,22 +824,28 @@ async function main(): Promise<void> {
     // These roots can now exist because this test created its own harmless sentinel files.
     officialExistence = officialPaths.map((path) => existsSync(path));
   });
-  await step("install_candidate_in_separate_default_directory", async () => {
-    await runInstaller(installer, "/S");
-    installedByThisRun = true;
-    assert.ok(ownsInstalledPath(executable) && existsSync(executable) && existsSync(uninstaller));
-    assert.ok(existsSync(join(installDirectory, "resources", "app.asar")));
-    await verifyFuses();
-    await assertOfficialDataUnchanged("install");
-  });
+  await step(
+    baselineInstaller
+      ? "install_pinned_056_baseline_in_separate_directory"
+      : "install_candidate_in_separate_default_directory",
+    async () => {
+      await runInstaller(baselineInstaller ?? installer, "/S");
+      installedByThisRun = true;
+      assert.ok(ownsInstalledPath(executable) && existsSync(executable) && existsSync(uninstaller));
+      assert.ok(existsSync(join(installDirectory, "resources", "app.asar")));
+      await verifyFuses();
+      await assertOfficialDataUnchanged("install");
+    },
+  );
   await step("launch_installed_private_app_without_account", async () => {
     await startApp();
     const info = await ipc(
       "window.openbot.getAppInfo()",
-      Schema.Struct({ name: Schema.String, privateBuild: Schema.Boolean }),
+      Schema.Struct({ name: Schema.String, version: Schema.String, privateBuild: Schema.Boolean }),
     );
     assert.equal(info.name, config.productName);
     assert.equal(info.privateBuild, true);
+    if (baselineInstaller) assert.equal(info.version, "0.56.0");
     const account = await ipc("window.openbot.auth.getState()", Schema.Struct({ status: Schema.String }));
     assert.equal(account.status, "signed_out");
     assert.equal(
@@ -892,41 +928,81 @@ async function main(): Promise<void> {
     assert.equal(team.members.filter((member) => member.role === "owner").length, 1);
     assert.ok(team.members.some((member) => member.id === deviceB.member.id));
   });
+  const messageSchema = Schema.Struct({
+    id: Schema.String,
+    senderMemberId: Schema.String,
+    recipientMemberId: Schema.String,
+    text: Schema.String,
+    sequence: Schema.Number,
+  });
+  const historySchema = Schema.Struct({ messages: Schema.Array(messageSchema) });
+  const history = await step("persist_two_real_direct_messages_without_a_provider", async () => {
+    const response = await request(TEAM_API_ROUTES.team.presence, deviceB.sessionToken);
+    assert.equal(response.status, 200);
+    const presence = Schema.decodeUnknownSync(
+      Schema.Struct({ members: Schema.Array(Schema.Struct({ id: Schema.String, role: Schema.String })) }),
+    )(await response.json());
+    const owner = presence.members.find((member) => member.role === "owner");
+    assert.ok(owner);
+    const sent = await ipc(
+      `window.openbot.servers.sendDirectMessage(${JSON.stringify({ memberId: deviceB.member.id, text: "Private CI history before upgrade: desktop to phone.", clientMessageId: "private-ci-desktop-history" })})`,
+      messageSchema,
+    );
+    const returned = await fetch(`${base}${TEAM_API_ROUTES.direct.messages}`, {
+      method: "POST",
+      headers: { ...headers(deviceB.sessionToken), "Content-Type": "application/json" },
+      body: JSON.stringify({
+        memberId: owner.id,
+        text: "Private CI history before upgrade: phone to desktop.",
+        clientMessageId: "private-ci-phone-history",
+      }),
+      signal: AbortSignal.timeout(20_000),
+    });
+    assert.equal(returned.status, 201);
+    const received = Schema.decodeUnknownSync(messageSchema)(await returned.json());
+    assert.notEqual(sent.id, received.id);
+    const local = await ipc(
+      `window.openbot.servers.readDirectConversation(${JSON.stringify(deviceB.member.id)})`,
+      historySchema,
+    );
+    assert.deepEqual(local.messages, [sent, received]);
+    return { ownerId: owner.id, messages: local.messages };
+  });
+  const connectEventSocket = async (token: string) => {
+    const socket = new WebSocket(
+      `${base.replace("http:", "ws:")}${TEAM_API_ROUTES.events}`,
+      [TEAM_PROTOCOL_V1_WEBSOCKET, `openbot-token.${token}`],
+      { headers: headers() },
+    );
+    sockets.push(socket);
+    let snapshot = false;
+    let invalidEvent = false;
+    socket.on("error", () => undefined);
+    socket.on("message", (data) => {
+      try {
+        const payload = Schema.decodeUnknownSync(Schema.Struct({ type: Schema.String }))(JSON.parse(data.toString()));
+        if (payload.type === "runtime-snapshot") snapshot = true;
+      } catch {
+        invalidEvent = true;
+      }
+    });
+    await once(socket, "open", { signal: AbortSignal.timeout(20_000) });
+    assert.equal(socket.protocol, TEAM_PROTOCOL_V1_WEBSOCKET);
+    socket.send(
+      encodeTeamProtocolV1CurrentClientEvent({
+        type: "agent-event-scope",
+        includeConversations: true,
+        capabilities: [...teamCapabilitiesForProtocol(9)],
+      }),
+    );
+    socket.send(encodeTeamProtocolV1CurrentClientEvent({ type: "runtime-snapshot-request" }));
+    await until("event_runtime_snapshot", () => snapshot || invalidEvent);
+    assert.equal(invalidEvent, false);
+    return socket;
+  };
   const { socketA, socketB } = await step("real_event_WebSocket_subprotocol_and_runtime_snapshot", async () => {
-    const connect = async (token: string) => {
-      const socket = new WebSocket(
-        `${base.replace("http:", "ws:")}${TEAM_API_ROUTES.events}`,
-        [TEAM_PROTOCOL_V1_WEBSOCKET, `openbot-token.${token}`],
-        { headers: headers() },
-      );
-      sockets.push(socket);
-      let snapshot = false;
-      let invalidEvent = false;
-      socket.on("error", () => undefined);
-      socket.on("message", (data) => {
-        try {
-          const payload = Schema.decodeUnknownSync(Schema.Struct({ type: Schema.String }))(JSON.parse(data.toString()));
-          if (payload.type === "runtime-snapshot") snapshot = true;
-        } catch {
-          invalidEvent = true;
-        }
-      });
-      await once(socket, "open", { signal: AbortSignal.timeout(20_000) });
-      assert.equal(socket.protocol, TEAM_PROTOCOL_V1_WEBSOCKET);
-      socket.send(
-        encodeTeamProtocolV1CurrentClientEvent({
-          type: "agent-event-scope",
-          includeConversations: true,
-          capabilities: [...teamCapabilitiesForProtocol(9)],
-        }),
-      );
-      socket.send(encodeTeamProtocolV1CurrentClientEvent({ type: "runtime-snapshot-request" }));
-      await until("event_runtime_snapshot", () => snapshot || invalidEvent);
-      assert.equal(invalidEvent, false);
-      return socket;
-    };
-    const socketA = await connect(deviceA.sessionToken);
-    const socketB = await connect(deviceB.sessionToken);
+    const socketA = await connectEventSocket(deviceA.sessionToken);
+    const socketB = await connectEventSocket(deviceB.sessionToken);
     return { socketA, socketB };
   });
   await step("real_HostService_revoke_closes_A_while_B_stays", async () => {
@@ -954,6 +1030,23 @@ async function main(): Promise<void> {
     assert.deepEqual(await profileEncryptionState(), encryptionState);
   });
   await step("restart_owned_app_after_reinstall", () => startApp());
+  await step("updated_application_has_the_candidate_version_and_hardened_fuses", async () => {
+    const info = await ipc(
+      "window.openbot.getAppInfo()",
+      Schema.Struct({ version: Schema.String, privateBuild: Schema.Boolean }),
+    );
+    assert.equal(info.version, version);
+    assert.equal(info.privateBuild, true);
+    assert.equal(
+      (await ipc("window.openbot.auth.getState()", Schema.Struct({ status: Schema.String }))).status,
+      "signed_out",
+    );
+    assert.equal(
+      await ipc("typeof window.require === 'undefined' && typeof window.process === 'undefined'", Schema.Boolean),
+      true,
+    );
+    await verifyFuses();
+  });
   await step("reinstall_preserves_host_identity", async () => {
     const status = await ipc("window.openbot.privateAccess.status()", statusSchema);
     assert.equal(status.hostId, first.hostId);
@@ -984,7 +1077,37 @@ async function main(): Promise<void> {
         httpStatus: retained.status,
         expectedHttpStatus: 200,
       });
+    const revoked = await request(TEAM_API_ROUTES.me, deviceA.sessionToken);
+    assert.equal(revoked.status, 401);
+    await revoked.body?.cancel();
   });
+  const verifyHistory = async () => {
+    const local = await ipc(
+      `window.openbot.servers.readDirectConversation(${JSON.stringify(deviceB.member.id)})`,
+      historySchema,
+    );
+    assert.deepEqual(local.messages, history.messages);
+    const remote = await request(TEAM_API_ROUTES.direct.conversation(history.ownerId), deviceB.sessionToken);
+    assert.equal(remote.status, 200);
+    assert.deepEqual(Schema.decodeUnknownSync(historySchema)(await remote.json()).messages, history.messages);
+    report.upgrade.historyMessages = history.messages.length;
+  };
+  await step("package_update_preserves_exact_message_ids_text_order_and_phone_read_access", verifyHistory);
+  await step("updated_candidate_event_socket_uses_the_saved_device_session", () =>
+    connectEventSocket(deviceB.sessionToken),
+  );
+  if (baselineInstaller) {
+    await step("reinstall_exact_candidate_again_preserves_sessions_and_history", async () => {
+      await stopApp(true);
+      const state = await profileEncryptionState();
+      await runInstaller(installer, "/S");
+      assert.deepEqual(await profileEncryptionState(), state);
+      await startApp();
+      assert.equal((await ipc("window.openbot.privateAccess.status()", statusSchema)).hostId, first.hostId);
+      await verifyHistory();
+      report.upgrade.performed = true;
+    });
+  }
   await step("reinstall_preserves_official_protocol_and_data_sentinels", () =>
     assertOfficialDataUnchanged("reinstall"),
   );

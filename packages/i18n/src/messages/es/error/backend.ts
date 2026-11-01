@@ -67,6 +67,7 @@ export const messages = {
   "error.backend.channelReferenceUnavailable": "El mensaje del canal al que se hace referencia no está disponible.",
   "error.backend.channelTaskNotFound": "No se encontró la tarea del canal.",
   "error.backend.channelTaskComplete": "Esta tarea ya está completada.",
+  "error.backend.channelTaskNotStopped": "Solo se puede cancelar una tarea detenida o fallida.",
   "error.backend.channelSelectAgent": "Selecciona un agente.",
   "error.backend.channelLeadRequired": "Elige un coordinador de canal disponible o asigna esta tarea a un miembro.",
   "error.backend.channelRoutingTooLong":
@@ -345,6 +346,9 @@ export const messages = {
   "error.backend.threadOpenLimitReached":
     "Este agente tiene {count} hilos abiertos. Archiva un hilo y después inicia o restaura otro.",
   "error.backend.threadRemoteUnsupported": "Los hilos solo están disponibles para los agentes de este equipo.",
+  "error.backend.branchSourceBusy": "Detén el turno actual antes de crear una rama de este chat.",
+  "error.backend.branchMessageNotFound": "Solo puedes crear una rama desde una respuesta terminada del agente.",
+  "error.backend.branchRemoteUnsupported": "Las ramas solo están disponibles para los agentes de este equipo.",
   "error.backend.threadMoveRefused":
     "Solo un mensaje que enviaste únicamente a este agente puede ejecutarse en un hilo nuevo.",
   "error.backend.taskTitleRequired": "Dale a la tarea un título corto.",

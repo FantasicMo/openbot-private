@@ -145,6 +145,8 @@ export function SkillsMarketplace() {
     setPendingPluginSlug,
     pendingPluginConnect,
     setPendingPluginConnect,
+    pendingMarketplaceListing,
+    setPendingMarketplaceListing,
   } = useSettings();
   const { agentList, activeAgent, agentStatus, agentSetupOpen, creatingAgent } = useAgents();
   const { selectAgent } = useNavigation();
@@ -176,6 +178,8 @@ export function SkillsMarketplace() {
         setPendingPluginSlug(null);
         setPendingPluginConnect(false);
       }}
+      marketplaceListing={pendingMarketplaceListing()}
+      onMarketplaceListingConsumed={() => setPendingMarketplaceListing(null)}
       connectors={connectors.active}
       macOS={platform.appInfo()?.platform === "darwin"}
       onAddServer={(serverId) => {

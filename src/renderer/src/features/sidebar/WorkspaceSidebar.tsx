@@ -29,6 +29,7 @@ import { useDirectMessages } from "../conversation/direct-messages-context";
 import { PRIVATE_BUILD } from "../private-access/private-build";
 import { useServerActions } from "../servers/server-actions";
 import { serverRoleCanAdminister } from "../servers/server-capabilities";
+import { useServerScope } from "../servers/server-scope";
 import { useServerSettings } from "../servers/server-settings";
 import { serverUpdateBadge, showServerUpdate } from "../servers/server-update-flow";
 import { useServers } from "../servers/servers-context";
@@ -59,6 +60,7 @@ export function WorkspaceSidebar(props: { peopleEnabled: boolean }) {
   const layout = useLayout();
   const platform = usePlatform();
   const channels = useChannels();
+  const serverScope = useServerScope();
   const { activeServer, activeServerId, activeServerSupportsCapability } = useServers();
   // The chats that main shows in a window of their own. Main sends the list on each change.
   const [chatWindows, setChatWindows] = createSignal<ChatWindowTarget[]>([]);
@@ -176,9 +178,17 @@ export function WorkspaceSidebar(props: { peopleEnabled: boolean }) {
    * sections beside the agents, so the sidebar has to be able to order and group them. The Routines
    * view lists only agents: a channel has no routine canvas. */
   const channelsListed = () => channels.supported() && layout.sidebarView() !== "routines";
-  const visibleChannels = createMemo(() =>
-    channelsListed() ? channels.state.channels.filter((channel) => !channel.archived) : [],
-  );
+  /* Until a joined server lists channels, the frame's rows hold their place, so the agents below stay. */
+  const sidebarChannels = () =>
+    !channels.state.listed &&
+    layout.sidebarView() !== "routines" &&
+    (!serverScope.loaded() || channels.supported()) &&
+    serverScope.frameChannels().length > 0
+      ? serverScope.frameChannels()
+      : channelsListed()
+        ? channels.state.channels
+        : [];
+  const visibleChannels = createMemo(() => sidebarChannels().filter((channel) => !channel.archived));
   /* A channel can open while the Routines view is on: from search, a notification, or a selection
    * restored at start. Its row must be in the list, so the list goes back to the agents view. */
   createEffect(
@@ -243,7 +253,7 @@ export function WorkspaceSidebar(props: { peopleEnabled: boolean }) {
   return (
     <Sidebar
       channels={visibleChannels()}
-      deletedChannels={channelsListed() ? channels.state.channels.filter((channel) => channel.archived) : []}
+      deletedChannels={sidebarChannels().filter((channel) => channel.archived)}
       activeChannelId={channels.state.selectedId}
       onSelectChannel={(id) => void channels.open(id)}
       onEditChannel={(id) => void channels.editChannel(id)}
@@ -301,6 +311,7 @@ export function WorkspaceSidebar(props: { peopleEnabled: boolean }) {
       activeDirectMemberId={activeDirectMemberId()}
       agentStates={sidebarAgentStates()}
       channelWaits={channelWaits()}
+      channelPreviewsPending={!channels.state.listed}
       agentMoods={agentMoods()}
       layout={sidebarLayout()}
       layoutMutable={activeServerSupportsCapability("sidebar-layout")}

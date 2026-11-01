@@ -10,6 +10,7 @@ branch after the source is available in GitHub Actions.
 frozen lockfile. It checks source lint, shared UI rules, the private package, main/preload, renderer and mobile consumer types,
 the three private service E2Es, and the selected IPC, preload, CSP and permission tests. The Windows
 candidate calls this same workflow and cannot build if verification fails.
+It also runs the protected backend migration fixtures and the real database tests with one worker.
 
 The three reports have different scopes. Gateway E2E uses a fixture authority; host E2E uses real
 TeamStore and account-boundary services with fixture HTTP/WS routes; mobile E2E uses real private
@@ -35,7 +36,7 @@ subprotocols and runtime snapshots. It revokes device A while device B stays act
 normal quit through verified CDP and waits for the exact owned process to exit. A bounded forced
 cleanup makes that lifecycle step fail. After quit, it checks that Windows `Local State` holds an
 encrypted key, and records only that file's hash and the encrypted owner file's hash. It reinstalls
-the same candidate and compares those files before the next launch. Chromium can change `Local State`
+the candidate and compares those files before the next launch. Chromium can change `Local State`
 during a normal launch, so the test does not require its hash to stay fixed across launches.
 The smoke then starts the app again, checks host/session and
 canary-file persistence, and uninstalls only that private application. The official protocol
@@ -54,8 +55,8 @@ relaunches the owned executable with the stored quoted argument, and checks the 
 and enabled setting. It then removes only the CI-created private item and verifies its absence.
 An existing private Run or StartupApproved value stops the smoke before any change. An actual
 Windows sign-in is a separate check; this smoke does not change this computer's login items.
-The report also excludes TLS/Serve, Android, remote desktop/browser streaming, older-release
-migration, tray interaction, hard-crash/power-loss durability, SmartScreen and Authenticode publisher acceptance. No owner secret,
+The report also excludes TLS/Serve, Android, remote desktop/browser streaming, tray interaction,
+hard-crash/power-loss durability, SmartScreen and Authenticode publisher acceptance. No owner secret,
 device credential, pairing offer, profile, raw application log or workspace is uploaded.
 
 The early forced-stop failure was reproduced without an installer using cached Electron 44.9.3 and
@@ -63,6 +64,57 @@ new isolated Windows profiles: immediate process termination left the new encryp
 from disk and the ciphertext could not be read on restart; normal `app.quit()` persisted the key
 and the same ciphertext decrypted. The installer smoke checks normal restart and update behavior.
 It does not claim that a new profile survives termination before Chromium commits its first key.
+
+## Upgrade checks for 0.58.0
+
+The Windows and Android candidate workflows select `verify_upgrade=true` by default. The helper
+`scripts/private-upgrade-baseline.py` downloads one pinned package from this private repository.
+It checks the run, commit, successful build job, immutable artifact ID and package SHA-256. It
+extracts only the expected package basename. It does not accept arbitrary artifact paths. These
+baselines were accepted before this upgrade; they contain no live profile or credentials.
+
+| Platform | Baseline source | Immutable artifact | Expected package SHA-256 |
+| --- | --- | --- | --- |
+| Windows 0.56.0 | `fe73b8506af784873219e41e6758e78f8905de29`, run `41188467812` | `13037872319` | `51e55bb3182b2c43c954589983245813da2202b2680122cd1964c86972be1e4e` |
+| Android 1.4.4, versionCode 1003 | `ade0c7cb71c37101f65f0906b64fe701c1153b3f`, run `41185911155` | `13038201558` | `ba6a54d92cfbf75c1a4c91aa54ef32c981ebd97605c23781ca0ce83cb5fbbc87` |
+
+Windows installs the old package into the empty disposable runner first. It creates two test
+devices, revokes one, and writes two direct messages with the real IPC and authenticated Team API.
+It then quits normally and installs the new candidate in place. It checks the saved encryption
+state before launch, new application version, host identity, gateway configuration, retained
+device session, and both messages' exact IDs, text and order from desktop and phone-facing APIs.
+It also reinstalls the same candidate and repeats the session/history read. The default paths,
+canary files, official sentinels and uninstall checks remain in scope. This proves preservation
+of the test data, not every historical user database or a provider conversation.
+
+Android first runs the unchanged candidate's clean-start and egress checks. It then removes only
+that CI-created test data and installs the old signed APK in the disposable emulator. The native
+HTTPS fixture pairs the old app. After force-stop, `adb install -r` applies the exact new APK with
+no data clear. The signer, package and increasing versionCode must match. The app UID must stay
+the same. A new fixture listener generation requires authenticated use of the saved session and
+a WebSocket upgrade attempt from the new app, with one member and one total pairing redemption.
+The fixture cannot establish an accepted WSS session or display real chat history. Chat history
+is held on the desktop; the Windows test checks a bounded real message history through the
+retained phone session. A physical phone's own existing pairing and history still need an
+in-place device check. Do not uninstall the phone app or ask the user to pair it again.
+
+Baseline bytes stay outside the candidate artifact. Only their provenance and redacted check
+results are retained. Artifact expiry makes the baseline check fail before installation; do not
+substitute a rebuild or silently omit the upgrade check.
+
+After the root integration snapshot is published, dispatch the two candidate workflows on that
+same branch. Use Android versionCode 1004 only if it is still unused for the retained signer:
+
+```powershell
+gh workflow run private-windows-candidate.yml --repo FantasicMo/openbot-private --ref private/upgrade-0.58.0-20261102 -f verify_upgrade=true
+gh workflow run private-android-candidate.yml --repo FantasicMo/openbot-private --ref private/upgrade-0.58.0-20261102 -f version_code=1004 -f verify_upgrade=true
+```
+
+Record each run's source SHA before download. Accept only the exact installer/APK hashes in the
+successful reports. Keep those bytes for company delivery. A later validator fix can use the
+existing Android artifact acceptance workflow with `native_pairing_fixture=true` and
+`verify_upgrade=true`; supply that build's run ID, immutable build artifact ID, source SHA,
+APK SHA-256 and versionCode. This rerun does not build or sign an APK.
 
 ## Recheck an existing Android APK
 
@@ -77,8 +129,9 @@ private package, version and two native ABIs before emulator startup. Its eviden
 build and validator commits/runs separately and verifies that the APK hash is unchanged afterward.
 The Ubuntu runner installs `libpulse0`, which QEMU needs even with audio disabled.
 
-This is the same scoped startup smoke used by the candidate workflow. It does not establish
-real-host pairing, provider execution, upgrade preservation or phone/Clash Mi acceptance. A failed
+This is the same scoped startup smoke used by the candidate workflow. Select `verify_upgrade` to
+run the pinned old-to-new native pairing check above. It does not establish real-host pairing,
+provider execution or physical-phone/Clash Mi acceptance. A failed
 smoke keeps an explicitly unaccepted report. Successful startup evidence does not itself publish a
 release or replace the required physical-device checks.
 

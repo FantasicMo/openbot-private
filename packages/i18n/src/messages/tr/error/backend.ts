@@ -66,6 +66,7 @@ export const messages = {
   "error.backend.channelReferenceUnavailable": "Referans verilen kanal mesajı kullanılamıyor.",
   "error.backend.channelTaskNotFound": "Kanal görevi bulunamadı.",
   "error.backend.channelTaskComplete": "Bu görev zaten tamamlandı.",
+  "error.backend.channelTaskNotStopped": "Yalnızca durdurulmuş veya başarısız bir görev iptal edilebilir.",
   "error.backend.channelSelectAgent": "Bir ajan seçin.",
   "error.backend.channelLeadRequired": "Kullanılabilir bir kanal lideri seçin veya bu görevi bir üyeye atayın.",
   "error.backend.channelRoutingTooLong":
@@ -328,6 +329,9 @@ export const messages = {
   "error.backend.threadOpenLimitReached":
     "Bu ajanın {count} açık mesaj dizisi var. Bir mesaj dizisini arşivleyin, ardından başka birini başlatın veya geri yükleyin.",
   "error.backend.threadRemoteUnsupported": "Mesaj dizileri yalnızca bu bilgisayardaki ajanlar için kullanılabilir.",
+  "error.backend.branchSourceBusy": "Bu sohbeti dallandırmadan önce geçerli turu durdurun.",
+  "error.backend.branchMessageNotFound": "Yalnızca ajanın tamamlanmış bir yanıtından dallandırabilirsiniz.",
+  "error.backend.branchRemoteUnsupported": "Dallar yalnızca bu bilgisayardaki ajanlar için kullanılabilir.",
   "error.backend.threadMoveRefused":
     "Yeni bir mesaj dizisinde yalnızca, doğrudan ve tek başına bu ajana gönderdiğiniz bir mesaj çalışabilir.",
   "error.backend.taskTitleRequired": "Göreve kısa bir başlık verin.",

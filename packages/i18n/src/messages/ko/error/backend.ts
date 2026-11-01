@@ -65,6 +65,7 @@ export const messages = {
   "error.backend.channelReferenceUnavailable": "참조한 채널 메시지를 사용할 수 없어요.",
   "error.backend.channelTaskNotFound": "채널 작업을 찾을 수 없어요.",
   "error.backend.channelTaskComplete": "이 작업은 이미 완료되었어요.",
+  "error.backend.channelTaskNotStopped": "중지되었거나 실패한 작업만 취소할 수 있어요.",
   "error.backend.channelSelectAgent": "에이전트를 선택하세요.",
   "error.backend.channelLeadRequired": "사용 가능한 채널 리더를 선택하거나 이 작업을 멤버에게 배정하세요.",
   "error.backend.channelRoutingTooLong":
@@ -322,6 +323,9 @@ export const messages = {
   "error.backend.threadOpenLimitReached":
     "이 에이전트에는 열린 스레드가 {count}개 있어요. 스레드 하나를 보관한 후 다른 스레드를 시작하거나 복원하세요.",
   "error.backend.threadRemoteUnsupported": "스레드는 이 컴퓨터의 에이전트에서만 사용할 수 있어요.",
+  "error.backend.branchSourceBusy": "이 채팅을 분기하기 전에 현재 턴을 중지하세요.",
+  "error.backend.branchMessageNotFound": "에이전트의 완료된 답변에서만 분기할 수 있어요.",
+  "error.backend.branchRemoteUnsupported": "분기는 이 컴퓨터의 에이전트에서만 사용할 수 있어요.",
   "error.backend.threadMoveRefused": "이 에이전트에게만 보낸 메시지만 새 스레드에서 실행할 수 있어요.",
   "error.backend.taskTitleRequired": "작업에 짧은 제목을 지정하세요.",
   "error.backend.taskToolInvalid": "작업에 120자 이하의 제목과 할 일을 설명하는 지시문을 지정하세요.",

@@ -15,6 +15,7 @@ import { RoutineFlowStore } from "../backend/routine-flows/routine-flow-store";
 import { createRoutineFlows, type RoutineFlowsHandle } from "../backend/routine-flows/routine-flows";
 import { RoutineResultStore } from "../backend/routine-results/routine-result-store";
 import { createRoutineResults, type RoutineResultsHandle } from "../backend/routine-results/routine-results";
+import { WorkflowGitHubStore } from "../backend/workflows/workflow-github-store";
 import { WorkflowRunStore } from "../backend/workflows/workflow-run-store";
 import { WorkflowStore } from "../backend/workflows/workflow-store";
 import { WorkflowTriggers, workflowScheduleDueAt } from "../backend/workflows/workflow-triggers";
@@ -23,6 +24,7 @@ import { type AcpRegistry, createAcpRegistry } from "./acp-registry";
 import { type AgentAdminSettingsService, createAgentAdminSettings } from "./agent-admin-settings";
 import { spawnAgentDatabaseHost } from "./agent-database-host-process";
 import { agentDisplayEnvironment, hasSeparateAgentDisplay } from "./agent-display";
+import { type AgentFolders, createAgentFolders } from "./agent-folders";
 import { type AgentHostSettingsService, createAgentHostSettings } from "./agent-host-settings";
 import { type BrowserProfileService, createBrowserProfileService } from "./browser-profile-service";
 import { HostReleaseService, readInstallationMode } from "./host-release-service";
@@ -91,6 +93,7 @@ import { decodeRecord, requiredString } from "@openbot/contracts/ipc-decoding";
 import { sourceText } from "@openbot/i18n/source";
 import { createOpenBotLogger, toLogValue } from "@openbot/logging";
 import { REMOTE_ACCOUNT_CHECK_INTERVAL_MS } from "@openbot/team-client";
+import { installRemoteSyncProfileSink } from "@openbot/team-client/sync-profile";
 import {
   app,
   BrowserWindow,
@@ -182,6 +185,7 @@ import { shouldAutoStartHost } from "./development-profile";
 import {
   applyDevelopmentRemoteAccount,
   type DevelopmentRemoteRole,
+  readDevelopmentClientTransport,
   startDevelopmentRemoteRole,
 } from "./development-remote-bootstrap";
 import { performDynamicIslandCriticalAction } from "./dynamic-island-actions";
@@ -194,6 +198,8 @@ import {
 import { githubAppConfig } from "./github-connector-config";
 import { GitHubConnectorService } from "./github-connector-service";
 import { GitHubConnectorStore } from "./github-connector-store";
+import { GitHubRelay, receiveGitHubDelivery } from "./github-relay";
+import { createGitHubRest, type WorkflowGitHubDirectory, workflowGitHubDirectory } from "./github-rest";
 import { HermesImportService } from "./hermes-import-service";
 import { HostEventsRuntime } from "./host-events-runtime";
 import { agentWebhookRoutineWriter, HostEventsService } from "./host-events-service";
@@ -278,6 +284,7 @@ import {
   createRemoteSessionReusePreferenceStore,
   type RemoteSessionReusePreferenceStore,
 } from "./remote-session-reuse-preference-store";
+import { remoteSyncProfileFile } from "./remote-sync-profile-file";
 import { sendToRenderer } from "./renderer-ipc";
 import { RequestedUpdate, RequestedUpdateRefusal } from "./requested-update";
 import { ResourceMonitor } from "./resource-monitor";
@@ -524,6 +531,8 @@ export interface ApplicationServices {
   service: AgentService;
   routineFlows: RoutineFlowsHandle;
   workflows: WorkflowsHandle;
+  /** The repositories, labels and people that the workflow editor offers from the GitHub connection. */
+  workflowGitHub: WorkflowGitHubDirectory;
   routineResults: RoutineResultsHandle;
   providerRuntimes: ProviderRuntimeManager;
   providerCredentials: ProviderCredentialStore;
@@ -561,6 +570,8 @@ export interface ApplicationServices {
   approvalAutomation: ApprovalAutomation;
   agentAdminSettings: AgentAdminSettingsService;
   agentHostSettings: AgentHostSettingsService;
+  /** The folders each agent can change besides its workspace, for the desktop settings and `agent-folders-v1`. */
+  agentFolders: AgentFolders;
   browserProfiles: BrowserProfileService;
   language: LanguageService;
   logoColor: LogoColorService;
@@ -671,6 +682,8 @@ interface MessagingServicesContext {
   sidebarLayout: SidebarLayoutStore;
   /** Read on each call: the team store that names this host is built after messaging. */
   readHostId: () => string | null;
+  /** The GitHub route ticket of the ingress socket; the GitHub relay holds the repository list. */
+  issueGitHubRoute: (hostId: string) => Effect.Effect<string, RemoteWorkflowError>;
   openLink: (url: string) => Promise<void>;
 }
 
@@ -685,6 +698,7 @@ async function createMessagingServices({
   service,
   sidebarLayout,
   readHostId,
+  issueGitHubRoute,
   openLink,
 }: MessagingServicesContext): Promise<{ messaging: MessagingService; signalIngress: SignalIngress }> {
   /*
@@ -717,6 +731,7 @@ async function createMessagingServices({
     issueDiscordRoute: (hostId) => centralAuth.issueDiscordRoute(hostId).pipe(toRemoteWorkflowError),
     issueWebhookRoute: (hostId) => centralAuth.issueWebhookRoute(hostId).pipe(toRemoteWorkflowError),
     issueTelegramRoute: (hostId) => centralAuth.issueTelegramRoute(hostId).pipe(toRemoteWorkflowError),
+    issueGitHubRoute,
     queueKey: () => loadIngressQueueKey(join(app.getPath("userData"), INGRESS_QUEUE_KEY_FILE), secretCipher),
   });
   teardown.push(TEARDOWN_ORDER.signalIngress, "the Signal ingress socket", () =>
@@ -1670,11 +1685,27 @@ export async function createApplicationServices({
   await Effect.runPromise(agentApiKeys.syncVault().pipe(Effect.ignore));
   // The schedule triggers of workflows share the routine timer; built after the workflows below.
   let workflowTriggers: WorkflowTriggers | null = null;
+  // Load the local catalog before telemetry starts so tool steps and inventory use the same names.
+  // Agents read it too, for the state of a Marketplace app they suggest.
+  const catalogPluginServers = await Effect.runPromise(
+    loadCatalogPluginServers(
+      app.isPackaged
+        ? join(process.resourcesPath, "plugin-catalog")
+        : resolve(__dirname, "../../resources/plugin-catalog"),
+    ),
+  );
   const service: AgentService = new AgentService({
     store,
     mailbox,
     browser,
     visualPreview: new ChatVisualPreviewer(),
+    marketplaceAppServer: (appId) => {
+      const listed = catalogPluginServers.filter((server) => server.slug === appId);
+      const [server] = listed;
+      if (!server || listed.length !== 1) return null;
+      const config = service.listMcpServers().find((saved) => catalogPluginSlug(saved, listed, homedir()) === appId);
+      return config ? { config, setupSteps: server.setupSteps } : null;
+    },
     prepareMcpTest: (config) =>
       prepareToolRuntimeForTest(config, {
         startToolRuntimes: () => {
@@ -1851,10 +1882,21 @@ export async function createApplicationServices({
     database: store.database,
     nextDueAt: workflowScheduleDueAt(() => serverTimezone.effective()),
   });
+  // The workflow calls to GitHub. The editor reads the labels and people of a repository through it.
+  const githubRest = createGitHubRest({
+    fetch: (url, init) => fetch(url, init),
+    tokens: (repository) => githubConnector.repositoryTokens(repository),
+  });
+  const workflowGitHub = workflowGitHubDirectory(() => githubConnector.workflowCatalog(), githubRest);
   const workflowRuntime = await Effect.runPromise(
     createWorkflows({
       store: workflowStore,
       runs: new WorkflowRunStore({ database: store.database }),
+      github: new WorkflowGitHubStore({ database: store.database }),
+      githubApp: () => githubAppConfig()?.slug ?? null,
+      // The relay is made with the ingress socket, below; a graph changes only after start.
+      watchGitHub: (repositories) => githubRelay.setRepositories(repositories),
+      githubApi: githubRest,
       delivery: (deliveryId) => {
         const found = mailbox.getDelivery(deliveryId)?.delivery;
         return found ? { status: found.status, turnId: found.turnId, error: found.error } : null;
@@ -1937,6 +1979,13 @@ export async function createApplicationServices({
   // it starts as "no name yet".
   let ingressHostId: () => string | null = () => null;
   performance.mark("openbot:services.routines");
+  // The repositories that the saved GitHub triggers watch. It holds the GitHub route of the ingress
+  // socket, which is made next.
+  const githubRelay = new GitHubRelay({
+    account: centralAuth,
+    githubToken: () => githubConnector.accessToken(),
+    ingress: () => signalIngress,
+  });
   const { messaging, signalIngress } = await createMessagingServices({
     teardown,
     secretCipher,
@@ -1944,6 +1993,7 @@ export async function createApplicationServices({
     service,
     sidebarLayout,
     readHostId: () => ingressHostId(),
+    issueGitHubRoute: (hostId) => githubRelay.issueRoute(hostId),
     openLink,
   });
   // A connect, a disconnect or an expiry changes the tools and the `gh` sign-in of every agent.
@@ -2148,8 +2198,30 @@ export async function createApplicationServices({
   });
   const eventsRuntime = new HostEventsRuntime(events);
   signalIngress.handleWebhooks((input) => events.receive(input));
+  githubRelay.handle({
+    deliver: (delivery) => receiveGitHubDelivery(workflowRuntime, delivery),
+    offline: (from, to) =>
+      workflowRuntime
+        .githubOffline(new Date(from), new Date(to))
+        .pipe(
+          Effect.catch((failure) =>
+            Effect.sync(() =>
+              logger.warn("The time without GitHub events was not recorded.", { cause: String(failure.cause) }),
+            ),
+          ),
+        ),
+  });
+  await Effect.runPromise(
+    workflowRuntime.githubRepositories().pipe(
+      Effect.tap((repositories) => Effect.sync(() => githubRelay.setRepositories(repositories))),
+      Effect.catch((failure) =>
+        Effect.sync(() => logger.warn("The GitHub triggers were not read.", { cause: String(failure.cause) })),
+      ),
+    ),
+  );
   teardown.push(TEARDOWN_ORDER.hostEvents, "the event service", async () => {
     webhookRelay.stop();
+    githubRelay.stop();
     await Effect.runPromise(eventsRuntime.stop());
   });
   // After `teamStore.initialize()` and before `HostService`, which reads the account it activates.
@@ -2158,6 +2230,7 @@ export async function createApplicationServices({
       applyDevelopmentRemoteAccount({
         role: developmentRemoteRole,
         testClientEnabled: developmentTestClientEnabled,
+        clientTransport: readDevelopmentClientTransport(process.env.OPENBOT_DEV_CLIENT_TRANSPORT),
         centralAuth,
         teamStore,
         setupFile,
@@ -2201,8 +2274,14 @@ export async function createApplicationServices({
   );
   const agentAdminSettings = createAgentAdminSettings({ agents: service, approvalAutomation });
   const agentHostSettings = createAgentHostSettings({ agents: service, busyMessageMode, agentDefaults });
-  const browserProfiles = createBrowserProfileService({ store: browserProfileStore, agents: service, browser });
-  const customProviderChanges = createCustomProviderChanges({ service, customProviders });
+  const agentFolders = createAgentFolders({ service, userDataPath: app.getPath("userData") });
+  const browserProfiles = createBrowserProfileService({
+    store: browserProfileStore,
+    agents: service,
+    browser,
+    onChanged: () => service.notifyBrowserProfilesChanged(),
+  });
+  const customProviderChanges = createCustomProviderChanges({ service, customProviders, providerRuntimes });
   const customAgentChanges = createCustomAgentChanges({ service, customAgents });
   const acpRegistry = createAcpRegistry({
     directory: app.getPath("userData"),
@@ -2337,7 +2416,7 @@ export async function createApplicationServices({
     store: teamStore,
     agents: service,
     // Defined below with the startup it waits for; a request runs only after this returns.
-    agentsReady: () => agentInitialization.awaitSettled(),
+    agentsReady: () => agentInitialization.awaitRoster(),
     events,
     skills,
     sidebarLayout,
@@ -2383,7 +2462,11 @@ export async function createApplicationServices({
     // Present, so the host advertises `routine-flows-v1`. Any member who can see the agents.
     routineFlows: routineFlowRuntime,
     // Present, so the host advertises `workflows-v1`. Any member who can see and talk to the agents.
-    workflows: { ...workflowRuntime, rotateWorkflowSecret: (input) => events.rotateWorkflowSecret(input) },
+    workflows: {
+      ...workflowRuntime,
+      rotateWorkflowSecret: (input) => events.rotateWorkflowSecret(input),
+      github: workflowGitHub,
+    },
     // Present, so the host advertises `agent-hidden-v1`. Any member can hide or restore an agent that they can see.
     hiddenAgents: service,
     // Present, so the host advertises `agent-notification-levels-v1`. Each member sets their own levels.
@@ -2401,8 +2484,10 @@ export async function createApplicationServices({
     admin: {
       agents: agentAdminSettings,
       agentHost: agentHostSettings,
+      folders: agentFolders,
       sessionSettings: service,
       acpRegistry,
+      customAgents: customAgentChanges,
       skills,
       sharedTables: service,
       marketplaceAgents,
@@ -2472,9 +2557,11 @@ export async function createApplicationServices({
     handOverRemoteHostKey: PRIVATE_BUILD
       ? undefined
       : (hostId, handover) => centralAuth.handOverRemoteHostKey(hostId, handover).pipe(toRemoteWorkflowError),
+    // The server list carries key changes for hosts in the official account directory.
+    onKeyRotated: PRIVATE_BUILD ? undefined : () => remoteServers.requestDirectoryRefresh(),
     issueRemoteHostTicket: PRIVATE_BUILD
       ? undefined
-      : (hostId) => centralAuth.issueRemoteHostTicket(hostId).pipe(toRemoteWorkflowError),
+      : (hostId, home) => centralAuth.issueRemoteHostTicket(hostId, home).pipe(toRemoteWorkflowError),
     sendLiveActivityPush: PRIVATE_BUILD
       ? undefined
       : (hostId, push) => centralAuth.sendLiveActivityPush(hostId, push).pipe(toRemoteWorkflowError),
@@ -2630,15 +2717,7 @@ export async function createApplicationServices({
   if (analyticsPlatform !== "darwin" && analyticsPlatform !== "win32" && analyticsPlatform !== "linux") {
     throw new Error(`Unsupported analytics platform: ${analyticsPlatform}`);
   }
-  // Load the local catalog before telemetry starts so tool steps and inventory use the same names.
   performance.mark("openbot:services.remote-desktop");
-  const catalogPluginServers = await Effect.runPromise(
-    loadCatalogPluginServers(
-      app.isPackaged
-        ? join(process.resourcesPath, "plugin-catalog")
-        : resolve(__dirname, "../../resources/plugin-catalog"),
-    ),
-  );
   const analyticsEnabled =
     !PRIVATE_BUILD && ((app.isPackaged && appVariant === "production") || analyticsCaptureUrl !== null);
   const failureReports = analyticsEnabled
@@ -2740,6 +2819,16 @@ export async function createApplicationServices({
   service.on("failure", (failure) => analytics.handleFailure(failure));
   resourceMonitor.start(() => analytics.checkResources());
   const connectTrace = new RemoteConnectTrace((span) => trace.record(span));
+  // Development only: a network round trip added to the WebRTC client, for `bun run perf:remote`.
+  const developmentRoundTripMs = app.isPackaged ? 0 : Math.max(0, Number(process.env.OPENBOT_DEV_RTT_MS) || 0);
+  installRemoteSyncProfileSink(
+    remoteSyncProfileFile({
+      isPackaged: app.isPackaged,
+      setting: process.env.OPENBOT_DEV_SYNC_PROFILE,
+      userData: app.getPath("userData"),
+      roundTripMs: developmentRoundTripMs,
+    }),
+  );
   const remoteServers = new RemoteServerManager(
     join(app.getPath("userData"), REMOTE_SERVERS_FILE),
     safeStorageCipher("error.app.macSecureStorageUnavailable"),
@@ -2795,6 +2884,7 @@ export async function createApplicationServices({
             transferDirectory: join(app.getPath("userData"), "remote-transfers"),
             connectTrace,
             sessionCache: remoteSessionCache,
+            developmentRoundTripMs,
           }),
     },
   );
@@ -2844,6 +2934,7 @@ export async function createApplicationServices({
       startDevelopmentRemoteRole({
         role: developmentRemoteRole,
         testClientEnabled: developmentTestClientEnabled,
+        clientTransport: readDevelopmentClientTransport(process.env.OPENBOT_DEV_CLIENT_TRANSPORT),
         host,
         remoteServers,
       }),
@@ -3038,10 +3129,12 @@ export async function createApplicationServices({
     updaterCacheDirectory,
   });
   teardown.push(TEARDOWN_ORDER.updater, "the update service", () => Effect.runPromise(updater.stop()));
-  const agentInitialization = new AgentInitializationGate(() =>
+  const agentInitialization = new AgentInitializationGate((rosterLoaded) =>
     Effect.gen(function* () {
       yield* Fiber.join(computerUseWarmUp);
       yield* service.initialize({ heldRoutines: takeRoutineHold(routineHoldFile, (message) => logger.warn(message)) });
+      // A client's agent list waits only until here. The steps below do not change the roster.
+      yield* rosterLoaded;
       yield* eventsRuntime.start();
       yield* automation.sync();
       // Picks up the flows a restart stopped between one agent's answer and the next agent's message.
@@ -3240,6 +3333,7 @@ export async function createApplicationServices({
     service,
     routineFlows: routineFlowRuntime,
     workflows: workflowRuntime,
+    workflowGitHub,
     routineResults: routineResultRuntime,
     providerRuntimes,
     providerCredentials,
@@ -3265,6 +3359,7 @@ export async function createApplicationServices({
     approvalAutomation,
     agentAdminSettings,
     agentHostSettings,
+    agentFolders,
     browserProfiles,
     language,
     logoColor,

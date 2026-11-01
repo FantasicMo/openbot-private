@@ -1,7 +1,12 @@
 import { isDynamicRecord, isString } from "@openbot/contracts/runtime-values";
 import { TEAM_API_ROUTES } from "@openbot/contracts/team-api-routes";
+import { AGENT_IMPORT_ROUTES, AGENT_IMPORT_UPLOAD_BYTES } from "@openbot/contracts/team-protocol/agent-import-v1";
 import { supportsTeamSemanticTags, teamCapabilitiesForProtocol } from "@openbot/contracts/team-protocol/current";
 import { teamHttpCodec } from "@openbot/contracts/team-protocol/http-codecs";
+import {
+  INSTANCE_TRANSFER_REMOTE_BYTES,
+  INSTANCE_TRANSFER_ROUTES,
+} from "@openbot/contracts/team-protocol/instance-transfer-v1";
 import { optionalTeamEvent, optionalTeamEventToCurrent } from "@openbot/contracts/team-protocol/optional-events";
 import { isQueueEditRoute, QueueEditRejectedError } from "@openbot/contracts/team-protocol/queue-edit-v1";
 import { teamSideRouteCodec } from "@openbot/contracts/team-protocol/side-routes";
@@ -257,11 +262,31 @@ export class PrivateHttpTransport {
     const url = new URL(path, host.publicOrigin);
     if (url.origin !== host.publicOrigin || !url.pathname.startsWith("/v1/"))
       throw new PrivateMobileError("unsupported");
+    const importStage = method === "POST" && url.pathname === AGENT_IMPORT_ROUTES.stage;
+    const transferStage = method === "POST" && url.pathname === INSTANCE_TRANSFER_ROUTES.stage;
+    const transferExport = method === "POST" && url.pathname === INSTANCE_TRANSFER_ROUTES.export;
+    // Only the frozen import/transfer routes carry files larger than an ordinary mobile attachment.
+    const uploadLimit = importStage
+      ? AGENT_IMPORT_UPLOAD_BYTES
+      : transferStage
+        ? INSTANCE_TRANSFER_REMOTE_BYTES
+        : FILE_LIMIT;
+    const uploadTooLarge = sourceText(
+      importStage
+        ? "error.import.remoteZipTooLarge"
+        : transferStage
+          ? "error.import.transferRemoteTooLarge"
+          : "error.remote.attachmentTooLarge",
+    );
+    const downloadLimit = transferExport ? INSTANCE_TRANSFER_REMOTE_BYTES : FILE_LIMIT;
+    const downloadTooLarge = sourceText(
+      transferExport ? "error.import.transferRemoteTooLarge" : "error.remote.attachmentTooLarge",
+    );
     const read = method === "GET" || method === "HEAD";
     if (!this.#active && read) throw new PrivateMobileError("network");
     const controller = new AbortController();
     this.#requests.set(controller, { read, upload: Boolean(upload), transferId });
-    const timer = setTimeout(() => controller.abort(), upload ? 10 * 60_000 : TIMEOUT_MS);
+    const timer = setTimeout(() => controller.abort(), upload || transferExport ? 10 * 60_000 : TIMEOUT_MS);
     const headers: Record<string, string> = {
       Accept: "application/json",
       Authorization: `Bearer ${host.sessionToken}`,
@@ -272,10 +297,9 @@ export class PrivateHttpTransport {
     try {
       let payload: BodyInit | undefined;
       if (upload) {
-        if (upload.base64.length > Math.ceil(FILE_LIMIT / 3) * 4)
-          throw new Error(sourceText("error.remote.attachmentTooLarge"));
+        if (upload.base64.length > Math.ceil(uploadLimit / 3) * 4) throw new Error(uploadTooLarge);
         const bytes = base64ToBytes(upload.base64);
-        if (bytes.byteLength > FILE_LIMIT) throw new Error(sourceText("error.remote.attachmentTooLarge"));
+        if (bytes.byteLength > uploadLimit) throw new Error(uploadTooLarge);
         headers["Content-Type"] = upload.mimeType;
         payload = bytes.buffer;
       } else if (body !== undefined && !read) {
@@ -321,9 +345,7 @@ export class PrivateHttpTransport {
           value = {
             name,
             mimeType: contentType.split(";", 1)[0],
-            base64: bytesToBase64(
-              await boundedBytes(response, FILE_LIMIT, sourceText("error.remote.attachmentTooLarge")),
-            ),
+            base64: bytesToBase64(await boundedBytes(response, downloadLimit, downloadTooLarge)),
           };
         } else {
           const text = await boundedText(response);

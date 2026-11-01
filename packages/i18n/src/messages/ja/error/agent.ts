@@ -21,7 +21,15 @@ export const messages = {
   "error.agent.messageOrAttachmentRequired": "メッセージまたは添付ファイルが必要です。",
   "error.agent.promptAnswersTooLong": "回答が長すぎます。",
   "error.agent.gone": "このエージェントはもう存在しません。",
+  "error.agent.instructionsTooLarge":
+    "指示ファイルが大きすぎるため、ここでは開けません。テキストエディタで短くしてください。",
+  "error.agent.instructionsOutside":
+    "指示ファイルがエージェントのワークスペース外を指しているため、OpenBot では開きません。",
+  "error.agent.instructionsReadFailed": "指示ファイルを読み込めませんでした。",
+  "error.agent.instructionsSaveFailed": "指示ファイルを保存できませんでした。",
   "error.agent.profileGenerationBusy": "プロフィールの生成中です。しばらくしてからもう一度お試しください。",
+  "error.agent.instructionsChanged":
+    "エージェントが指示ファイルを変更しました。最後の変更は保存されていません。もう一度変更してください。",
   "error.agent.initialMessageRequired": "最初のメッセージが必要です。",
   "error.agent.initialMessageTooLong": "最初のメッセージが長すぎます。",
   "error.agent.setupCleanupFailed": "エージェントのセットアップに失敗し、不完全なエージェントを削除できませんでした。",

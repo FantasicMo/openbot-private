@@ -28,6 +28,11 @@ on:
         required: false
         default: false
         type: boolean
+      verify_upgrade:
+        description: Also pair the accepted versionCode 1003 APK and check an in-place update to these exact bytes.
+        required: false
+        default: false
+        type: boolean
 
 permissions:
   contents: read
@@ -177,6 +182,15 @@ jobs:
             sdkmanager --list_installed
           } > "$CANDIDATE_DIR/emulator/tools.txt"
 
+      - name: Fetch the pinned accepted Android upgrade baseline
+        if: inputs.verify_upgrade
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python3 scripts/private-upgrade-baseline.py --platform android --output-dir "$RUNNER_TEMP/private-upgrade-baseline"
+          cp "$RUNNER_TEMP/private-upgrade-baseline/baseline-provenance.json" "$CANDIDATE_DIR/upgrade-baseline-provenance.json"
+
       - name: Verify and smoke test the unchanged release APK
         id: startup
         shell: bash
@@ -213,6 +227,7 @@ jobs:
               'emulatorStartup': 'passed' if passed else os.environ.get('STARTUP_OUTCOME', 'not_run'),
               'networkEvidence': report.get('network', {'instrumented': False}),
               'nativePairingFixture': report.get('nativePairing', {'passed': False, 'status': 'not_run'}),
+              'upgradeVerification': report.get('upgrade', {'performed': False, 'status': 'not_run'}),
               'realHostPairing': 'not_run', 'phoneAndClashMi': 'not_run',
           }
           (candidate / 'ACCEPTANCE.json').write_text(json.dumps(state, indent=2) + '\n')

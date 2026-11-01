@@ -254,7 +254,6 @@ interface AgentSettingsDraft {
   avatar: AvatarEditor;
   dirty: Record<keyof AgentTextFields, boolean>;
   fields: AgentTextFields;
-  notifications: boolean;
   permission: AgentPermissionLevel;
   computerUse: boolean;
   allowAutomation: boolean;
@@ -297,7 +296,6 @@ export default function AgentSettingsPanel(props: AgentSettingsPanelProps) {
     },
     dirty: { description: false, name: false, title: false },
     fields: { description: "", name: "", title: "" },
-    notifications: true,
     permission: untrack(() => currentPermission()),
     computerUse: true,
     allowAutomation: false,
@@ -458,7 +456,6 @@ export default function AgentSettingsPanel(props: AgentSettingsPanelProps) {
           agent.name,
           agent.title,
           agent.description,
-          String(agent.notifications),
           currentPermission(),
           String(agentComputerUseEnabled(agent)),
           String(agentAutomationAllowed(agent, agentDefaults())),
@@ -503,7 +500,6 @@ export default function AgentSettingsPanel(props: AgentSettingsPanelProps) {
           if (!keep.name) state.fields.name = agent.name;
           if (!keep.title) state.fields.title = agent.title;
           if (!keep.description) state.fields.description = agent.description;
-          state.notifications = agent.notifications;
           state.permission = currentPermission();
           state.computerUse = agentComputerUseEnabled(agent);
           state.allowAutomation = agentAutomationAllowed(agent, agentDefaults());
@@ -1236,14 +1232,14 @@ export default function AgentSettingsPanel(props: AgentSettingsPanelProps) {
                   onBlur={saveTitle}
                 />
               </SettingsField>
-              <SettingsField label={t("agentSettings.instructions")}>
+              <SettingsField label={t("agentSettings.description")}>
                 <ResizableTextarea
-                  class="settings-instructions-input"
-                  rows="5"
+                  class="settings-instructions-input settings-description-input"
+                  rows="3"
                   value={draft.fields.description}
-                  aria-label={t("agentSettings.instructionsLabel")}
-                  resizeLabel={t("agentSettings.instructionsResize")}
-                  placeholder={t("agentSettings.instructionsPlaceholder")}
+                  aria-label={t("agentSettings.descriptionLabel")}
+                  resizeLabel={t("agentSettings.descriptionResize")}
+                  placeholder={t("agentSettings.descriptionPlaceholder")}
                   invalid={instructionsTooLong(draft.fields.description)}
                   onValueChange={(value) => {
                     setDraft((state) => {
@@ -1254,7 +1250,7 @@ export default function AgentSettingsPanel(props: AgentSettingsPanelProps) {
                   }}
                   onBlur={saveDescription}
                 />
-                <InstructionsLimit text={draft.fields.description} />
+                <InstructionsLimit text={draft.fields.description} tooLong="agent.description.tooLong" />
               </SettingsField>
               <SettingsLinkGroup inset class="agent-settings-runtime-rows" title={t("agentSettings.groups.brain")}>
                 <ProviderModelPicker
@@ -1366,9 +1362,7 @@ export default function AgentSettingsPanel(props: AgentSettingsPanelProps) {
                       />
                     </SettingsLinkGroup>
                     <Text as="p" class="agent-settings-runtime-note" variant="caption" tone="muted">
-                      {draft.notifications
-                        ? t("agentSettings.notificationLevel.note")
-                        : t("agentSettings.notificationLevel.sharedOff")}
+                      {t("agentSettings.notificationLevel.note")}
                     </Text>
                   </>
                 )}
@@ -1682,7 +1676,7 @@ export default function AgentSettingsPanel(props: AgentSettingsPanelProps) {
 }
 
 /** Lets a long path wrap after a slash instead of inside a folder name. */
-function breakablePath(path: string) {
+export function breakablePath(path: string) {
   return path.split("/").map((part, index) =>
     index === 0 ? (
       part

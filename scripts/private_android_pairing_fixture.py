@@ -25,7 +25,7 @@ def base64url(value):
     return base64.urlsafe_b64encode(value).decode().rstrip("=")
 
 
-def native_pairing_fixture(device, shell, package, activity, uid, chain, tables, output, sensitive):
+def native_pairing_fixture(device, shell, package, activity, uid, chain, tables, output, sensitive, upgrade=None):
     """Trust an ephemeral test CA in the emulator system, never in the APK or phone."""
     if os.environ.get("GITHUB_ACTIONS") != "true" or os.environ.get("RUNNER_ENVIRONMENT") != "github-hosted" or sys.platform != "linux" or shell("getprop", "ro.kernel.qemu") != "1":
         raise RuntimeError("Native fixture trust changes require a disposable GitHub-hosted emulator.")
@@ -325,6 +325,11 @@ def native_pairing_fixture(device, shell, package, activity, uid, chain, tables,
             thread.join(timeout=10)
             if thread.is_alive():
                 raise RuntimeError("The old fixture server did not drain before relaunch.")
+            if upgrade is not None:
+                stage = "install-candidate-over-paired-baseline"
+                upgrade()
+                evidence["steps"].append({"name": "install_candidate_with_replace_flag_without_clearing_app_data", "passed": True})
+                stage = "reopen-upgraded-saved-session"
             server, thread = start_server(port, 1)
             shell("am", "start", "-W", "-n", activity, timeout=90)
             wait_for(lambda value: state["reopenedWebsocket"] > 0 and "Paste the pairing offer from your computer" not in text_values(value))
@@ -333,6 +338,8 @@ def native_pairing_fixture(device, shell, package, activity, uid, chain, tables,
                     raise RuntimeError("Reopen must use the saved session without a second redemption.")
                 evidence["requests"] = {"identity": state["identity"], "redemptions": state["pair"], "authenticated": state["authenticated"], "reopenedAuthenticated": state["reopenedAuthenticated"], "reopenedWebsocketAttempts": state["reopenedWebsocket"], "members": len(state["members"])}
             evidence["steps"].append({"name": "process_reopen_restores_SecureStore_session_without_repair", "passed": True})
+            if upgrade is not None:
+                evidence["steps"].append({"name": "upgraded_app_restores_host_and_SecureStore_session_without_second_redemption", "passed": True})
             evidence["passed"] = True
     except Exception:
         evidence["failedStage"] = stage

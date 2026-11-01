@@ -2,9 +2,16 @@ name: Build private Windows candidate
 
 on:
   workflow_dispatch:
+    inputs:
+      verify_upgrade:
+        description: Also install the accepted 0.56.0 package and check the in-place update.
+        required: false
+        default: true
+        type: boolean
 
 permissions:
   contents: read
+  actions: read
 
 concurrency:
   group: private-windows-candidate-${{ github.ref }}
@@ -68,6 +75,12 @@ jobs:
       - name: Package private unsigned installer
         run: bunx --no-install electron-builder --config electron-builder.private.yml --win nsis --x64 --publish never
 
+      - name: Fetch the pinned accepted Windows upgrade baseline
+        if: inputs.verify_upgrade
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python scripts/private-upgrade-baseline.py --platform windows --output-dir "$env:RUNNER_TEMP/private-upgrade-baseline"
+
       - name: Install and drive the real private application
         run: |
           # Bun and Electron must not pass PowerShell 7 module paths to Windows PowerShell 5.
@@ -91,8 +104,12 @@ jobs:
           $smokePath = '.openbot-build/private-windows-installer-e2e/report.json'
           $smoke = Get-Content -LiteralPath $smokePath -Raw | ConvertFrom-Json
           if ($smoke.passed -ne $true) { throw 'The installed application did not pass smoke verification.' }
+          if ('${{ inputs.verify_upgrade }}' -eq 'true' -and $smoke.upgrade.performed -ne $true) { throw 'The old-to-new installation did not pass upgrade verification.' }
           Copy-Item -LiteralPath $installer[0].FullName -Destination $candidateDirectory
           Copy-Item -LiteralPath $smokePath -Destination (Join-Path $candidateDirectory 'installer-report.json')
+          if ($env:PRIVATE_UPGRADE_BASELINE) {
+            Copy-Item -LiteralPath (Join-Path $env:RUNNER_TEMP 'private-upgrade-baseline/baseline-provenance.json') -Destination (Join-Path $candidateDirectory 'upgrade-baseline-provenance.json')
+          }
           $assets = @(Get-ChildItem -LiteralPath $candidateDirectory -File | Sort-Object Name | ForEach-Object {
             [ordered]@{ path = $_.Name; sha256 = (Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant(); bytes = $_.Length }
           })
@@ -112,6 +129,7 @@ jobs:
             signature = 'unsigned-internal-candidate'
             serviceVerification = 'passed'
             installerSmoke = 'passed'
+            upgradeVerification = $smoke.upgrade
             artifacts = $assets
           }
           if ($metadata.sourceCommit -ne $env:GITHUB_SHA) { throw 'The checked-out source does not match the workflow commit.' }

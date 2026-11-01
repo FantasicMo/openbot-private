@@ -2,7 +2,7 @@
 // The Team API HTTP/WS routes and native network/storage ports are isolated fixtures.
 // No Expo runtime, TLS trust, Android, tailnet or model provider is exercised.
 import assert from "node:assert/strict";
-import { randomBytes, randomUUID } from "node:crypto";
+import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { once } from "node:events";
 import { mkdir, writeFile } from "node:fs/promises";
 import { createServer, type Server } from "node:http";
@@ -15,8 +15,13 @@ import {
   type TeamRealtimeEvent,
 } from "@openbot/contracts/ipc";
 import { TEAM_API_ROUTES } from "@openbot/contracts/team-api-routes";
+import { AGENT_IMPORT_ROUTES, AGENT_IMPORT_UPLOAD_BYTES } from "@openbot/contracts/team-protocol/agent-import-v1";
 import { teamCapabilitiesForProtocol } from "@openbot/contracts/team-protocol/current";
 import { teamHttpCodec } from "@openbot/contracts/team-protocol/http-codecs";
+import {
+  INSTANCE_TRANSFER_REMOTE_BYTES,
+  INSTANCE_TRANSFER_ROUTES,
+} from "@openbot/contracts/team-protocol/instance-transfer-v1";
 import { encodeTeamProtocolV8BaseCurrentEvent } from "@openbot/contracts/team-protocol/v8-base-adapter";
 import { sourceText } from "@openbot/i18n/source";
 import { PRIVATE_PAIRING_PATH } from "@openbot/private-access/contracts";
@@ -45,6 +50,19 @@ import { TeamStore } from "../src/main/team-store";
 
 const output = resolve(import.meta.dirname, "../.openbot-build/private-mobile-transport-e2e");
 const origin = "https://private-mobile-fixture.test";
+const mobileAppVersion = "1.4.5";
+const upstream058Capabilities = [
+  "agent-new-chat-v1",
+  "browser-profiles-events-v1",
+  "agent-plan-card-v1",
+  "ui-block-auto-answer-v1",
+  "agent-folders-v1",
+  "host-key-rotation-v1",
+  "agent-thread-branches-v1",
+  "custom-agents-v1",
+  "channel-task-cancel-v1",
+  "workflows-github-v1",
+];
 const report: { passed: boolean; scope: string; steps: { name: string; passed: boolean }[]; unverified: string[] } = {
   passed: false,
   scope: "real_mobile_adapters_private_service_and_TeamStore_with_native_and_Team_API_fixture_ports",
@@ -128,6 +146,7 @@ async function main() {
   let mobileNow = Date.now();
   let persisted: string | null = null;
   const file = Uint8Array.from([0, 255, 128, 13, 10, 42]);
+  let transferFile: Buffer | null = null;
   const upstream = createServer(async (request, response) => {
     const url = new URL(request.url ?? "/", "http://localhost");
     const method = request.method ?? "GET";
@@ -143,7 +162,7 @@ async function main() {
       }
       if (url.pathname === TEAM_API_ROUTES.compatibility) {
         json(200, {
-          appVersion: "0.56.0",
+          appVersion: "0.58.0",
           protocol: { minimum: 3, maximum: 9 },
           capabilities: teamCapabilitiesForProtocol(9),
         });
@@ -155,8 +174,10 @@ async function main() {
           return;
         }
         assert.equal(request.headers["openbot-protocol-version"], "9");
-        assert.equal(request.headers["openbot-app-version"], "1.4.4");
+        assert.equal(request.headers["openbot-app-version"], mobileAppVersion);
         assert.ok(String(request.headers["openbot-capabilities"]).includes("long-capability-lists-v1"));
+        for (const capability of upstream058Capabilities)
+          assert.ok(String(request.headers["openbot-capabilities"]).split(",").includes(capability));
         const chunks: Buffer[] = [];
         for await (const chunk of request) chunks.push(Buffer.from(chunk));
         const body = JSON.parse(Buffer.concat(chunks).toString("utf8"));
@@ -175,6 +196,61 @@ async function main() {
         return;
       }
       assert.equal(request.headers["openbot-protocol-version"], "9");
+      if (
+        method === "POST" &&
+        (url.pathname === AGENT_IMPORT_ROUTES.stage || url.pathname === INSTANCE_TRANSFER_ROUTES.stage)
+      ) {
+        assert.ok(transferFile);
+        assert.equal(request.headers["content-type"], "application/zip");
+        const hash = createHash("sha256");
+        let size = 0;
+        for await (const chunk of request) {
+          hash.update(chunk);
+          size += chunk.length;
+        }
+        assert.equal(size, transferFile.byteLength);
+        assert.equal(hash.digest("hex"), createHash("sha256").update(transferFile).digest("hex"));
+        json(
+          200,
+          url.pathname === AGENT_IMPORT_ROUTES.stage
+            ? {
+                token: "fixture-import",
+                sourceApp: "Grok Bot",
+                exportedAt: null,
+                agents: [],
+                channels: [],
+                warnings: [],
+              }
+            : {
+                token: "fixture-transfer",
+                appVersion: "0.58.0",
+                exportedAt: null,
+                agents: [],
+                hasSettings: true,
+                warnings: [],
+              },
+        );
+        return;
+      }
+      if (url.pathname === INSTANCE_TRANSFER_ROUTES.export && method === "POST") {
+        assert.ok(transferFile);
+        const chunks: Buffer[] = [];
+        for await (const chunk of request) chunks.push(Buffer.from(chunk));
+        assert.deepEqual(JSON.parse(Buffer.concat(chunks).toString("utf8")), {
+          agentIds: ["fixture-agent"],
+          includeFiles: true,
+          includeSettings: true,
+        });
+        response.writeHead(200, {
+          "Content-Type": "application/zip",
+          "Content-Disposition": `attachment; filename*=UTF-8''${encodeURIComponent("主机导出.zip")}`,
+          ...(url.searchParams.has("oversized")
+            ? { "Content-Length": String(INSTANCE_TRANSFER_REMOTE_BYTES + 1) }
+            : {}),
+        });
+        response.end(transferFile);
+        return;
+      }
       if (url.pathname === TEAM_API_ROUTES.agents.status && method === "GET") {
         response.writeHead(200, { "Content-Type": "application/json" });
         response.end(codec.encodeResponse(method, url.pathname, 200, providerStatus, {}));
@@ -369,7 +445,7 @@ async function main() {
     network,
     () => undefined,
     () => mobileNow,
-    "1.4.4",
+    mobileAppVersion,
   );
   const updates: string[] = [];
   const events: string[] = [];
@@ -384,7 +460,7 @@ async function main() {
         receivedEvents.push(event);
       },
     },
-    "1.4.4",
+    mobileAppVersion,
   );
   let capacityPersisted: string | null = null;
   let capacityWrites = 0;
@@ -401,7 +477,7 @@ async function main() {
     network,
     () => undefined,
     () => mobileNow,
-    "1.4.4",
+    mobileAppVersion,
   );
   try {
     await Effect.runPromise(service.initialize());
@@ -421,7 +497,7 @@ async function main() {
         network,
         () => undefined,
         () => mobileNow,
-        "1.4.4",
+        mobileAppVersion,
       );
       await hosts.restore();
       assert.equal(hosts.host(identity.serverId).member.id, paired.member.id);
@@ -452,7 +528,7 @@ async function main() {
         network,
         () => undefined,
         () => mobileNow,
-        "1.4.4",
+        mobileAppVersion,
       );
       await hosts.restore();
       mobileNow = Date.parse(offer.expiresAt) + 1;
@@ -494,7 +570,7 @@ async function main() {
         network,
         () => undefined,
         () => mobileNow,
-        "1.4.4",
+        mobileAppVersion,
       );
       await hosts.restore();
       await step("host_login_rejects_missing_protocol_headers_before_authentication", async () => {
@@ -541,7 +617,7 @@ async function main() {
         network,
         () => undefined,
         () => mobileNow,
-        "1.4.4",
+        mobileAppVersion,
       );
       await reloaded.restore();
       assert.equal(reloaded.state().hosts.length, MAX_PRIVATE_HOSTS);
@@ -565,7 +641,7 @@ async function main() {
         network,
         () => undefined,
         () => mobileNow,
-        "1.4.4",
+        mobileAppVersion,
       );
       await reloaded.restore();
       assert.equal(reloaded.state().hosts.length, MAX_PRIVATE_HOSTS);
@@ -626,6 +702,7 @@ async function main() {
       assert.equal(scope.type, "agent-event-scope");
       assert.equal(scope.includeConversations, true);
       assert.ok(scope.capabilities.includes("long-capability-lists-v1"));
+      for (const capability of upstream058Capabilities) assert.ok(scope.capabilities.includes(capability));
     });
     await step("diagnostic_replay_preserves_mobile_activity_and_released_status_projection", async () => {
       // Replay through the released codec and real transport; no provider or native UI runs here.
@@ -820,6 +897,72 @@ async function main() {
         transport.request("GET", `${TEAM_API_ROUTES.attachment("fixture-file")}?oversized=1`, (value) => value),
         tooLarge,
       );
+    });
+    await step("import_and_transfer_route_binary_limits_preserve_attachment_limit", async () => {
+      transferFile = Buffer.alloc(MOBILE_ATTACHMENT_BYTES + 1, 173);
+      const upload = { name: "fixture.zip", mimeType: "application/zip", base64: transferFile.toString("base64") };
+      const exportInput = { agentIds: ["fixture-agent"], includeFiles: true, includeSettings: true };
+      try {
+        for (const [path, token] of [
+          [AGENT_IMPORT_ROUTES.stage, "fixture-import"],
+          [INSTANCE_TRANSFER_ROUTES.stage, "fixture-transfer"],
+        ] as const) {
+          const progress: number[] = [];
+          const preview = await transport.request(
+            "POST",
+            path,
+            (value) => value,
+            undefined,
+            upload,
+            (fraction) => progress.push(fraction),
+          );
+          assert.ok(JSON.stringify(preview).includes(token));
+          assert.deepEqual(progress, [0, 1]);
+        }
+        const download = await transport.request(
+          "POST",
+          INSTANCE_TRANSFER_ROUTES.export,
+          (value) => value,
+          exportInput,
+        );
+        assert.deepEqual(download, { name: "主机导出.zip", mimeType: upload.mimeType, base64: upload.base64 });
+        const ordinaryTooLarge = (error: unknown) =>
+          error instanceof Error && error.message === sourceText("error.remote.attachmentTooLarge");
+        const before = networkPaths.length;
+        for (const [method, path] of [
+          ["POST", TEAM_API_ROUTES.attachments],
+          ["POST", `${AGENT_IMPORT_ROUTES.stage}/other`],
+          ["PUT", INSTANCE_TRANSFER_ROUTES.stage],
+        ] as const)
+          await assert.rejects(
+            transport.request(method, path, (value) => value, undefined, upload),
+            ordinaryTooLarge,
+          );
+        assert.equal(networkPaths.length, before);
+        // The length guard rejects these strings before base64 decoding or a network request.
+        for (const [path, limit, message] of [
+          [AGENT_IMPORT_ROUTES.stage, AGENT_IMPORT_UPLOAD_BYTES, sourceText("error.import.remoteZipTooLarge")],
+          [
+            INSTANCE_TRANSFER_ROUTES.stage,
+            INSTANCE_TRANSFER_REMOTE_BYTES,
+            sourceText("error.import.transferRemoteTooLarge"),
+          ],
+        ] as const)
+          await assert.rejects(
+            transport.request("POST", path, (value) => value, undefined, {
+              ...upload,
+              base64: "A".repeat(Math.ceil(limit / 3) * 4 + 4),
+            }),
+            (error) => error instanceof Error && error.message === message,
+          );
+        assert.equal(networkPaths.length, before);
+        await assert.rejects(
+          transport.request("POST", `${INSTANCE_TRANSFER_ROUTES.export}?oversized=1`, (value) => value, exportInput),
+          (error) => error instanceof Error && error.message === sourceText("error.import.transferRemoteTooLarge"),
+        );
+      } finally {
+        transferFile = null;
+      }
     });
     await step("background_reopen_and_reconnect_snapshot", async () => {
       transport.setActive(false);

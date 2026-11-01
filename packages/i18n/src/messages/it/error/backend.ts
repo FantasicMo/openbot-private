@@ -66,6 +66,7 @@ export const messages = {
   "error.backend.channelReferenceUnavailable": "Il messaggio del canale a cui si fa riferimento non è disponibile.",
   "error.backend.channelTaskNotFound": "Attività del canale non trovata.",
   "error.backend.channelTaskComplete": "Questa attività è già completata.",
+  "error.backend.channelTaskNotStopped": "Si può annullare solo un'attività interrotta o non riuscita.",
   "error.backend.channelSelectAgent": "Seleziona un agente.",
   "error.backend.channelLeadRequired":
     "Scegli un responsabile del canale disponibile o assegna questa attività a un membro.",
@@ -345,6 +346,9 @@ export const messages = {
   "error.backend.threadOpenLimitReached":
     "Questo agente ha {count} thread aperti. Archivia un thread, poi avviane o ripristinane un altro.",
   "error.backend.threadRemoteUnsupported": "I thread sono disponibili solo per gli agenti su questo computer.",
+  "error.backend.branchSourceBusy": "Interrompi il turno in corso prima di creare un ramo di questa chat.",
+  "error.backend.branchMessageNotFound": "Puoi creare un ramo solo da una risposta completata dell'agente.",
+  "error.backend.branchRemoteUnsupported": "I rami sono disponibili solo per gli agenti su questo computer.",
   "error.backend.threadMoveRefused":
     "Solo un messaggio che hai inviato soltanto a questo agente può essere eseguito in un nuovo thread.",
   "error.backend.taskTitleRequired": "Dai all'attività un titolo breve.",
