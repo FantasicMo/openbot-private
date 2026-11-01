@@ -8,7 +8,7 @@ on:
         required: true
         type: string
       build_artifact_id:
-        description: Immutable private-android-build artifact ID, not the final or diagnostic artifact.
+        description: Immutable private-android-build artifact ID; the pinned recovery option permits only diagnostics artifact 13093056405.
         required: true
         type: string
       build_commit:
@@ -30,6 +30,11 @@ on:
         type: boolean
       verify_upgrade:
         description: Also pair the accepted versionCode 1003 APK and check an in-place update to these exact bytes.
+        required: false
+        default: false
+        type: boolean
+      recover_known_validation_failure:
+        description: Recover only run 41328430796 artifact 13093056405 after its recorded Python fixture-import error; keep the original failure evidence.
         required: false
         default: false
         type: boolean
@@ -55,6 +60,8 @@ jobs:
       EXPECTED_APK_SHA256: ${{ inputs.apk_sha256 }}
       EXPECTED_VERSION_CODE: ${{ inputs.version_code }}
       NATIVE_PAIRING_FIXTURE: ${{ inputs.native_pairing_fixture && '1' || '0' }}
+      VERIFY_UPGRADE: ${{ inputs.verify_upgrade && '1' || '0' }}
+      RECOVER_KNOWN_VALIDATION_FAILURE: ${{ inputs.recover_known_validation_failure && '1' || '0' }}
       CERT_SHA256: ${{ vars.PRIVATE_ANDROID_CERT_SHA256 }}
     steps:
       - name: Select disposable acceptance directories
@@ -99,6 +106,15 @@ jobs:
           if source.get('repository_id') != repo_id or source.get('head_repository_id') != repo_id or source.get('head_sha') != commit:
               raise SystemExit('The artifact must come from this repository and expected commit.')
           match = re.fullmatch(rf'private-android-build-{run_id}-([1-9][0-9]*)', artifact['name'])
+          recovery = os.environ['RECOVER_KNOWN_VALIDATION_FAILURE'] == '1'
+          if recovery:
+              expected = (41328430796, 13093056405, 'ca1bf715eb4699753661b65ac654f4ef4e673d73', '7cb12c484e7140edb77583e34ee5725ddf8ac2d63d820d5ac1cea134359948ad', '1004')
+              actual = (run_id, artifact_id, commit, os.environ['EXPECTED_APK_SHA256'].lower(), os.environ['EXPECTED_VERSION_CODE'])
+              if actual != expected or os.environ['GITHUB_REPOSITORY'].lower() != 'fantasicmo/openbot-private':
+                  raise SystemExit('Recovery is limited to the pinned run, artifact, commit, APK hash and versionCode.')
+              if os.environ['NATIVE_PAIRING_FIXTURE'] != '1' or os.environ['VERIFY_UPGRADE'] != '1':
+                  raise SystemExit('Pinned recovery requires both native pairing and old-to-new upgrade checks.')
+              match = re.fullmatch(r'private-android-build-diagnostics-41328430796-(1)', artifact['name'])
           if match is None:
               raise SystemExit('Only the signed build artifact can enter acceptance.')
           attempt = int(match.group(1))
@@ -111,6 +127,8 @@ jobs:
               'expectedApkSha256': os.environ['EXPECTED_APK_SHA256'].lower(),
               'expectedVersionCode': int(os.environ['EXPECTED_VERSION_CODE']),
               'expectedCertificateSha256': os.environ['CERT_SHA256'].replace(':', '').lower(),
+              'recoveredOriginalValidationFailure': recovery,
+              'originalBuildRunConclusion': run['conclusion'],
           }
           (root / 'android-build-provenance.json').write_text(json.dumps(provenance, indent=2) + '\n')
           (root / 'android-build-attempt').write_text(str(attempt) + '\n')
@@ -123,12 +141,40 @@ jobs:
           root = Path(os.environ['RUNNER_TEMP'])
           jobs = json.loads((root / 'android-source-jobs.json').read_text())['jobs']
           matches = [job for job in jobs if job['name'] == 'Build signed APK candidate']
-          if len(matches) != 1 or matches[0]['conclusion'] != 'success' or matches[0]['head_sha'] != os.environ['BUILD_COMMIT'].lower():
-              raise SystemExit('The artifact must have a successful signed APK build job.')
+          if len(matches) != 1 or matches[0]['head_sha'] != os.environ['BUILD_COMMIT'].lower():
+              raise SystemExit('The artifact must have the expected signed APK build job and commit.')
+          job = matches[0]
           provenance = json.loads((root / 'android-build-provenance.json').read_text())
-          provenance['buildJobId'] = matches[0]['id']
+          if provenance['recoveredOriginalValidationFailure']:
+              steps = job['steps']
+              assembled = [step for step in steps if step['name'] == 'Build signed standalone APK']
+              failed = [step for step in steps if step['conclusion'] == 'failure']
+              if job['id'] != 124913835421 or job['conclusion'] != 'failure' or len(assembled) != 1 or assembled[0]['conclusion'] != 'success' or len(failed) != 1 or failed[0]['name'] != 'Verify identity, signature and native ABIs':
+                  raise SystemExit('The pinned recovery requires successful native assembly and only the known validation-step failure.')
+          elif job['conclusion'] != 'success':
+              raise SystemExit('The artifact must have a successful signed APK build job.')
+          provenance['buildJobId'] = job['id']
+          provenance['originalBuildJobConclusion'] = job['conclusion']
           (root / 'android-build-provenance.json').write_text(json.dumps(provenance, indent=2) + '\n')
           PY
+          if [[ "$RECOVER_KNOWN_VALIDATION_FAILURE" == '1' ]]; then
+            gh api "repos/$GITHUB_REPOSITORY/actions/jobs/124913835421/logs" --allow-escape-sequences > "$RUNNER_TEMP/android-original-validation.log"
+            python3 - <<'PY'
+          import json, os, re
+          from pathlib import Path
+          root = Path(os.environ['RUNNER_TEMP'])
+          log = root / 'android-original-validation.log'
+          if log.stat().st_size > 100 * 1024 * 1024:
+              raise SystemExit('The original job log exceeds the recovery bound.')
+          error = "ModuleNotFoundError: No module named 'private_android_pairing_fixture'"
+          pattern = re.compile(r'\d{4}-\d{2}-\d{2}T\S+Z ' + re.escape(error))
+          if not any(pattern.fullmatch(line.strip()) for line in log.read_text().splitlines()):
+              raise SystemExit('The original job log does not contain the pinned fixture-import failure.')
+          provenance = json.loads((root / 'android-build-provenance.json').read_text())
+          provenance['originalValidationFailure'] = {'step': 'Verify identity, signature and native ABIs', 'error': error, 'jobLogVerified': True}
+          (root / 'android-build-provenance.json').write_text(json.dumps(provenance, indent=2) + '\n')
+          PY
+          fi
 
       - name: Download the immutable signed build artifact
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
@@ -144,8 +190,34 @@ jobs:
         run: |
           set -euo pipefail
           cp "$RUNNER_TEMP/android-build-provenance.json" "$CANDIDATE_DIR/build-provenance.json"
-          grep -Fx "Commit: ${BUILD_COMMIT,,}" "$CANDIDATE_DIR/tool-versions.txt"
-          grep -Fx "versionCode: $EXPECTED_VERSION_CODE" "$CANDIDATE_DIR/tool-versions.txt"
+          if [[ "$RECOVER_KNOWN_VALIDATION_FAILURE" == '1' ]]; then
+            python3 - <<'PY'
+          import hashlib, json, os
+          from pathlib import Path
+          candidate = Path(os.environ['CANDIDATE_DIR'])
+          apk = candidate / 'openbot-private.apk'
+          digest = hashlib.sha256(apk.read_bytes()).hexdigest()
+          if digest != os.environ['EXPECTED_APK_SHA256'].lower():
+              raise SystemExit('The recovered APK differs from the pinned operator-verified hash.')
+          failure = candidate / 'BUILD-FAILED.txt'
+          marker = f"Commit: {os.environ['BUILD_COMMIT'].lower()}; run: {os.environ['BUILD_RUN_ID']}; attempt: 1."
+          if not failure.exists() or marker not in failure.read_text().splitlines():
+              raise SystemExit('The original failed-build marker must remain in the recovered artifact.')
+          provenance_path = candidate / 'build-provenance.json'
+          provenance = json.loads(provenance_path.read_text())
+          provenance['recoveryEvidence'] = {
+              'checksumOrigin': 'validator_generated_after_pinned_operator_hash_check',
+              'originalFailureMarkerSha256': hashlib.sha256(failure.read_bytes()).hexdigest(),
+              'originalToolVersions': 'not_recorded_after_original_validator_failure',
+              'noRebuildOrResign': True,
+          }
+          provenance_path.write_text(json.dumps(provenance, indent=2) + '\n')
+          (candidate / 'SHA256SUMS').write_text(f'{digest}  openbot-private.apk\n')
+          PY
+          else
+            grep -Fx "Commit: ${BUILD_COMMIT,,}" "$CANDIDATE_DIR/tool-versions.txt"
+            grep -Fx "versionCode: $EXPECTED_VERSION_CODE" "$CANDIDATE_DIR/tool-versions.txt"
+          fi
 
       - name: Set up Java for Android SDK tools
         uses: actions/setup-java@de7274f081f381c8f8158605e0321c36c376e2e6 # v6.0.1
@@ -213,7 +285,7 @@ jobs:
           apk = candidate / 'openbot-private.apk'
           if not apk.exists():
               raise SystemExit('No validated build APK was downloaded; no acceptance artifact can be produced.')
-          provenance = json.loads((Path(os.environ['RUNNER_TEMP']) / 'android-build-provenance.json').read_text())
+          provenance = json.loads((candidate / 'build-provenance.json').read_text())
           report_path = candidate / 'emulator' / 'report.json'
           report = json.loads(report_path.read_text()) if report_path.exists() else {}
           digest = hashlib.sha256(apk.read_bytes()).hexdigest()
@@ -223,6 +295,7 @@ jobs:
               'schema': 1, 'status': 'startup_smoke_passed' if passed else 'startup_smoke_not_accepted',
               'commit': provenance['buildCommit'], 'validatorCommit': os.environ['GITHUB_SHA'],
               'provenance': provenance, 'apkSha256': digest, 'unchangedBuildApk': same,
+              'recoveredOriginalValidationFailure': provenance.get('recoveredOriginalValidationFailure', False),
               'packaging': 'passed' if report.get('certificateSha256') == provenance['expectedCertificateSha256'] and report.get('versionCode') == provenance['expectedVersionCode'] else 'not_confirmed',
               'emulatorStartup': 'passed' if passed else os.environ.get('STARTUP_OUTCOME', 'not_run'),
               'networkEvidence': report.get('network', {'instrumented': False}),

@@ -189,9 +189,10 @@ jobs:
           apk="$CANDIDATE_DIR/openbot-private.apk"
           "$tools_dir/apksigner" verify --verbose --print-certs "$apk" > "$CANDIDATE_DIR/signature.txt"
           python3 - <<'PY'
-          import os, runpy
+          import os, runpy, sys
           from pathlib import Path
           candidate = Path(os.environ['CANDIDATE_DIR'])
+          sys.path.insert(0, str(Path('scripts').resolve()))
           verify = runpy.run_path('scripts/private-android-emulator-smoke.py')['apk_signer_certificate_fingerprint']
           certificate = verify((candidate / 'signature.txt').read_text(), os.environ['CERT_SHA256'])
           (candidate / 'apk-signing-certificate.sha256').write_text(certificate + '\n')

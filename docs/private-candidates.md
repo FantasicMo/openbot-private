@@ -129,6 +129,15 @@ private package, version and two native ABIs before emulator startup. Its eviden
 build and validator commits/runs separately and verifies that the APK hash is unchanged afterward.
 The Ubuntu runner installs `libpulse0`, which QEMU needs even with audio disabled.
 
+One explicit recovery option is limited to build run `41328430796`, diagnostic artifact
+`13093056405`, source commit `ca1bf715eb4699753661b65ac654f4ef4e673d73` and the pinned versionCode1004
+APK hash. Native compilation and APK signature verification completed before a Python sibling-module
+import failed in the validator. Recovery requires that exact failed step and its original log witness,
+keeps `BUILD-FAILED.txt` and the original failure conclusion, and requires native pairing and the
+1003-to-1004 update checks. It does not rebuild or sign the APK. Generated checksums are marked as
+recovery evidence; absent original tool-version records are not fabricated. The option is off by
+default and does not admit other failed build artifacts.
+
 This is the same scoped startup smoke used by the candidate workflow. Select `verify_upgrade` to
 run the pinned old-to-new native pairing check above. It does not establish real-host pairing,
 provider execution or physical-phone/Clash Mi acceptance. A failed
